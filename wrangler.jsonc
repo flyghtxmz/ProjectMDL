@@ -1,0 +1,20 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "projectmdl-router",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-03-17",
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS"
+  },
+  "kv_namespaces": [
+    {
+      "binding": "MODAL_ROUTER_KV",
+      "id": "PUT_YOUR_KV_NAMESPACE_ID_HERE",
+      "preview_id": "PUT_YOUR_KV_PREVIEW_ID_HERE"
+    }
+  ],
+  "vars": {
+    "DASHBOARD_TITLE": "ProjectMDL Router"
+  }
+}

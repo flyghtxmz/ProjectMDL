@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ProjectMDL Router</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="ambient ambient-a"></div>
+    <div class="ambient ambient-b"></div>
+    <main class="shell">
+      <section class="hero">
+        <div>
+          <p class="eyebrow">Cloudflare + Modal</p>
+          <h1>ProjectMDL Router</h1>
+          <p class="lede">
+            Dashboard para alternar endpoints cold start do Modal e expor um ponto unico em
+            <code>/modal/*</code>.
+          </p>
+        </div>
+        <div class="hero-card">
+          <span class="hero-label">Proxy publico</span>
+          <code id="proxy-base">carregando...</code>
+          <span class="hero-label">Endpoint ativo</span>
+          <strong id="active-endpoint-name">nenhum</strong>
+        </div>
+      </section>
+
+      <section class="grid">
+        <article class="panel">
+          <div class="panel-head">
+            <h2>Painel</h2>
+            <button id="refresh-button" class="ghost-button" type="button">Atualizar</button>
+          </div>
+
+          <label class="field">
+            <span>Token admin</span>
+            <input id="admin-token" type="password" placeholder="Opcional, se voce configurou secret" />
+          </label>
+
+          <div class="actions">
+            <button id="save-token-button" type="button">Salvar token local</button>
+            <button id="clear-token-button" class="ghost-button" type="button">Limpar token</button>
+          </div>
+
+          <div class="status-box" id="status-box">
+            Pronto para configurar endpoints.
+          </div>
+        </article>
+
+        <article class="panel">
+          <div class="panel-head">
+            <h2>Adicionar endpoint</h2>
+            <span id="form-mode">novo</span>
+          </div>
+
+          <form id="endpoint-form" class="stack">
+            <input id="endpoint-id" type="hidden" />
+
+            <label class="field">
+              <span>Nome</span>
+              <input id="endpoint-name" type="text" placeholder="L40S principal" required />
+            </label>
+
+            <label class="field">
+              <span>URL do Modal</span>
+              <input
+                id="endpoint-url"
+                type="url"
+                placeholder="https://seu-endpoint.modal.run"
+                required
+              />
+            </label>
+
+            <label class="field">
+              <span>Notas</span>
+              <textarea id="endpoint-notes" rows="3" placeholder="Ex.: cold start com Qwen"></textarea>
+            </label>
+
+            <label class="toggle">
+              <input id="endpoint-enabled" type="checkbox" checked />
+              <span>Endpoint habilitado</span>
+            </label>
+
+            <div class="actions">
+              <button id="submit-button" type="submit">Salvar endpoint</button>
+              <button id="cancel-edit-button" class="ghost-button" type="button">Cancelar</button>
+            </div>
+          </form>
+        </article>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Endpoints</h2>
+          <span id="endpoint-counter">0 configurados</span>
+        </div>
+        <div id="endpoint-list" class="endpoint-list"></div>
+      </section>
+    </main>
+
+    <template id="endpoint-row-template">
+      <article class="endpoint-card">
+        <div class="endpoint-main">
+          <div class="endpoint-title-row">
+            <strong class="endpoint-name"></strong>
+            <span class="badge active-badge" hidden>ativo</span>
+            <span class="badge disabled-badge" hidden>desabilitado</span>
+          </div>
+          <code class="endpoint-url"></code>
+          <p class="endpoint-notes"></p>
+        </div>
+        <div class="endpoint-actions">
+          <button class="activate-button" type="button">Ativar</button>
+          <button class="edit-button ghost-button" type="button">Editar</button>
+          <button class="delete-button danger-button" type="button">Remover</button>
+        </div>
+      </article>
+    </template>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
