@@ -75,6 +75,12 @@ npm run deploy
 - `PUT /api/catalog`: persiste o estado atual do catálogo salvo pela UI
 - `POST /api/catalog/save-active`: consulta o catálogo do endpoint ativo e o persiste no catálogo central
 - `POST /api/catalog/import`: recebe catálogo enviado pelo ComfyUI/Modal e faz merge/upsert por `entry_id`
+
+Por padrao, as importacoes do catalogo sao conservadoras:
+
+- `entry_id` novo: adiciona a entrada
+- `entry_id` existente: preserva os valores ja salvos e so preenche campos vazios
+- edicao manual pelo dashboard (`PUT /api/catalog`): aplica overwrite explicito daquilo que foi editado
 - `POST /api/modal-registry/report`: recebe eventos do Modal e salva o ultimo estado por endpoint
 - `ALL /modal/*`: encaminha para o endpoint ativo
 - `GET /dashboard/`: abre o dashboard administrativo
@@ -104,6 +110,11 @@ Por padrao, o Worker tenta estes caminhos no endpoint ativo:
 Se o endpoint de status devolver `catalog_endpoint`, `catalog_url` ou `catalog_api_endpoint`, esse caminho tem prioridade.
 
 Se a URL salva do endpoint ativo vier com um sufixo como `/comfyui/api/run-workflow`, o Worker normaliza para a base do deploy antes de montar a URL do catálogo.
+
+Para status/health, o Dashboard tenta primeiro:
+
+- `/comfyui/status`
+- `/comfyui-modal/status`
 
 ## Observação importante
 

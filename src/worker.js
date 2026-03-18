@@ -3,7 +3,9 @@ const REGISTRY_KEY_PREFIX = "registry:endpoint:";
 const CATALOG_ENTRY_KEY_PREFIX = "catalog:entry:";
 const CATALOG_META_KEY = "catalog:meta";
 const CATALOG_SNAPSHOT_KEY = "catalog:snapshot";
-const DEFAULT_STATUS_PATH = "/comfyui-modal/status";
+const CATALOG_MERGE_PRESERVE_EXISTING = "preserve_existing";
+const CATALOG_MERGE_PREFER_INCOMING = "prefer_incoming";
+const DEFAULT_STATUS_PATHS = ["/comfyui/status", "/comfyui-modal/status"];
 const DEFAULT_ACTIVE_CATALOG_PATHS = [
   "/comfyui/catalog",
   "/comfyui/catalog.json",
@@ -424,7 +426,7 @@ async function handleCatalogImport(request, env) {
   return jsonResponse(await importCatalogPayload(env, normalized));
 }
 
-async function importCatalogPayload(env, normalized) {
+async function importCatalogPayload(env, normalized, options = {}) {
   const result = await upsertCatalogEntries(env, normalized.entries, {
     source: normalized.source,
     app: normalized.app,
@@ -434,6 +436,7 @@ async function importCatalogPayload(env, normalized) {
     updatedAtUtc: normalized.updatedAtUtc,
     reason: normalized.reason,
     received: normalized.entries.length,
+    mergeMode: options.mergeMode || CATALOG_MERGE_PRESERVE_EXISTING,
   });
 
   return {
@@ -482,6 +485,7 @@ async function handleCatalogSave(request, env) {
     updatedAtUtc: payload?.updatedAtUtc || new Date().toISOString(),
     reason: "manual",
     received: normalizedEntries.length,
+    mergeMode: CATALOG_MERGE_PREFER_INCOMING,
   });
 
   return jsonResponse({
@@ -690,15 +694,12 @@ async function upsertCatalogEntries(env, entries, syncContext) {
   const normalizedEntries = entries.map((entry) => normalizeCatalogEntry(entry, syncContext));
   const currentSnapshotEntries = await loadCatalogSnapshot(env);
   const snapshotById = new Map(currentSnapshotEntries.map((entry) => [entry.entryId, entry]));
+  const mergeMode = syncContext?.mergeMode || CATALOG_MERGE_PRESERVE_EXISTING;
   const upsertedEntries = await Promise.all(
     normalizedEntries.map(async (entry) => {
       const key = catalogEntryKey(entry.entryId);
       const existing = normalizeStoredCatalogEntry(await env.MODAL_ROUTER_KV.get(key, "json"));
-      const merged = {
-        ...existing,
-        ...entry,
-        createdAtUtc: existing?.createdAtUtc || new Date().toISOString(),
-      };
+      const merged = mergeCatalogEntries(existing, entry, mergeMode);
       await env.MODAL_ROUTER_KV.put(key, JSON.stringify(merged));
       snapshotById.set(merged.entryId, merged);
       return merged;
@@ -904,6 +905,9 @@ function normalizeStoredCatalogEntry(raw) {
     bootId: normalizeOptionalText(raw?.bootId),
     lastReason: normalizeOptionalText(raw?.lastReason),
     createdAtUtc: normalizeOptionalTimestamp(raw?.createdAtUtc),
+    lastImportedAtUtc: normalizeOptionalTimestamp(raw?.lastImportedAtUtc),
+    lastImportedSource: normalizeOptionalText(raw?.lastImportedSource),
+    lastImportedReason: normalizeOptionalText(raw?.lastImportedReason),
   };
 }
 
@@ -916,6 +920,72 @@ function normalizeCatalogEntryForStorage(entry) {
     ...normalized,
     createdAtUtc: normalized.createdAtUtc || new Date().toISOString(),
   };
+}
+
+function mergeCatalogEntries(existing, incoming, mergeMode) {
+  const now = new Date().toISOString();
+  if (!existing) {
+    return {
+      ...incoming,
+      createdAtUtc: now,
+      lastImportedAtUtc: incoming.updatedAtUtc || now,
+      lastImportedSource: incoming.source,
+      lastImportedReason: incoming.lastReason,
+    };
+  }
+
+  if (mergeMode === CATALOG_MERGE_PREFER_INCOMING) {
+    return {
+      ...existing,
+      ...incoming,
+      createdAtUtc: existing.createdAtUtc || now,
+      lastImportedAtUtc: incoming.updatedAtUtc || now,
+      lastImportedSource: incoming.source || existing.lastImportedSource,
+      lastImportedReason: incoming.lastReason || existing.lastImportedReason,
+    };
+  }
+
+  return {
+    entryId: existing.entryId || incoming.entryId,
+    provider: preferCatalogExistingValue(existing.provider, incoming.provider),
+    url: preferCatalogExistingValue(existing.url, incoming.url),
+    filename: preferCatalogExistingValue(existing.filename, incoming.filename),
+    category: preferCatalogExistingValue(existing.category, incoming.category),
+    subdir: preferCatalogExistingValue(existing.subdir, incoming.subdir),
+    savedPath: preferCatalogExistingValue(existing.savedPath, incoming.savedPath),
+    timestampUtc: preferCatalogExistingValue(existing.timestampUtc, incoming.timestampUtc),
+    updatedAtUtc: preferCatalogExistingValue(existing.updatedAtUtc, incoming.updatedAtUtc),
+    source: preferCatalogExistingValue(existing.source, incoming.source),
+    app: preferCatalogExistingValue(existing.app, incoming.app),
+    sourceEndpointId: preferCatalogExistingValue(
+      existing.sourceEndpointId,
+      incoming.sourceEndpointId
+    ),
+    sourceEndpointLabel: preferCatalogExistingValue(
+      existing.sourceEndpointLabel,
+      incoming.sourceEndpointLabel
+    ),
+    bootId: preferCatalogExistingValue(existing.bootId, incoming.bootId),
+    lastReason: preferCatalogExistingValue(existing.lastReason, incoming.lastReason),
+    createdAtUtc: existing.createdAtUtc || now,
+    lastImportedAtUtc: incoming.updatedAtUtc || now,
+    lastImportedSource: incoming.source || existing.lastImportedSource,
+    lastImportedReason: incoming.lastReason || existing.lastImportedReason,
+  };
+}
+
+function preferCatalogExistingValue(existingValue, incomingValue) {
+  return hasCatalogValue(existingValue) ? existingValue : incomingValue;
+}
+
+function hasCatalogValue(value) {
+  if (value === null || value === undefined) {
+    return false;
+  }
+  if (typeof value === "string") {
+    return value.trim().length > 0;
+  }
+  return true;
 }
 
 function catalogEntryKey(entryId) {
@@ -1339,63 +1409,85 @@ function findEndpointProbeTarget(endpointId, config, registryByEndpointId) {
 
 function buildProbeTarget(endpointId, endpointLabel, baseUrl, registry) {
   const normalizedBaseUrl = normalizeOptionalUrl(baseUrl);
-  const statusUrl =
-    resolveUrlAgainstBase(registry?.statusEndpoint, normalizedBaseUrl) ||
-    resolveUrlAgainstBase(DEFAULT_STATUS_PATH, normalizedBaseUrl);
-  if (!statusUrl) {
+  const statusUrls = buildStatusCandidateUrls(normalizedBaseUrl, registry);
+  if (!statusUrls.length) {
     return null;
   }
   return {
     endpointId,
     endpointLabel,
     baseUrl: normalizedBaseUrl,
-    statusUrl,
+    statusUrl: statusUrls[0],
+    statusUrls,
   };
 }
 
-async function probeEndpointStatus(target) {
-  try {
-    const response = await fetch(target.statusUrl, {
-      method: "GET",
-      headers: {
-        accept: "application/json, text/plain;q=0.9, */*;q=0.8",
-        "cache-control": "no-store",
-      },
-    });
-    const contentType = response.headers.get("content-type") || "";
-    const payload = contentType.includes("application/json")
-      ? await response.json()
-      : await response.text();
-    if (!response.ok) {
-      return {
-        endpointId: target.endpointId,
-        endpointLabel: target.endpointLabel,
-        baseUrl: target.baseUrl,
-        probeUrl: target.statusUrl,
-        reachable: false,
-        ok: false,
-        httpStatus: response.status,
-        error:
-          typeof payload === "string"
-            ? payload.slice(0, 240)
-            : payload?.error || `HTTP ${response.status}`,
-        checkedAtUtc: new Date().toISOString(),
-      };
-    }
-    return normalizeEndpointStatusPayload(target, payload, response.status);
-  } catch (error) {
-    return {
-      endpointId: target.endpointId,
-      endpointLabel: target.endpointLabel,
-      baseUrl: target.baseUrl,
-      probeUrl: target.statusUrl,
-      reachable: false,
-      ok: false,
-      httpStatus: null,
-      error: error instanceof Error ? error.message : "Falha ao consultar o endpoint.",
-      checkedAtUtc: new Date().toISOString(),
-    };
+function buildStatusCandidateUrls(baseUrl, registry) {
+  const candidates = [];
+  const explicit = resolveUrlAgainstBase(registry?.statusEndpoint, baseUrl);
+  if (explicit) {
+    candidates.push(explicit);
   }
+  for (const path of DEFAULT_STATUS_PATHS) {
+    const resolved = resolveUrlAgainstBase(path, baseUrl);
+    if (resolved && !candidates.includes(resolved)) {
+      candidates.push(resolved);
+    }
+  }
+  return candidates;
+}
+
+async function probeEndpointStatus(target) {
+  const candidateUrls = Array.isArray(target.statusUrls) && target.statusUrls.length
+    ? target.statusUrls
+    : [target.statusUrl];
+  let lastError = null;
+  for (const candidateUrl of candidateUrls) {
+    try {
+      const response = await fetch(candidateUrl, {
+        method: "GET",
+        headers: {
+          accept: "application/json, text/plain;q=0.9, */*;q=0.8",
+          "cache-control": "no-store",
+        },
+      });
+      const contentType = response.headers.get("content-type") || "";
+      const payload = contentType.includes("application/json")
+        ? await response.json()
+        : await response.text();
+      if (!response.ok) {
+        lastError =
+          typeof payload === "string"
+            ? `${candidateUrl} -> ${payload.slice(0, 240)}`
+            : `${candidateUrl} -> ${payload?.error || `HTTP ${response.status}`}`;
+        continue;
+      }
+      return normalizeEndpointStatusPayload(
+        {
+          ...target,
+          statusUrl: candidateUrl,
+        },
+        payload,
+        response.status
+      );
+    } catch (error) {
+      lastError = `${candidateUrl} -> ${
+        error instanceof Error ? error.message : "Falha ao consultar o endpoint."
+      }`;
+    }
+  }
+  return {
+    endpointId: target.endpointId,
+    endpointLabel: target.endpointLabel,
+    baseUrl: target.baseUrl,
+    probeUrl: candidateUrls[0] || target.statusUrl,
+    triedProbeUrls: candidateUrls,
+    reachable: false,
+    ok: false,
+    httpStatus: null,
+    error: lastError || "Falha ao consultar o endpoint.",
+    checkedAtUtc: new Date().toISOString(),
+  };
 }
 
 function normalizeEndpointStatusPayload(target, payload, httpStatus) {
