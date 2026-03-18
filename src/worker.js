@@ -2,6 +2,7 @@ const CONFIG_KEY = "router-config";
 const REGISTRY_KEY_PREFIX = "registry:endpoint:";
 const CATALOG_ENTRY_KEY_PREFIX = "catalog:entry:";
 const CATALOG_META_KEY = "catalog:meta";
+const CATALOG_SNAPSHOT_KEY = "catalog:snapshot";
 const DEFAULT_STATUS_PATH = "/comfyui-modal/status";
 const DEFAULT_ACTIVE_CATALOG_PATHS = [
   "/comfyui/catalog",
@@ -398,7 +399,7 @@ async function buildCatalogPayload(env) {
   return {
     ok: true,
     entries,
-    totalEntries: entries.length,
+    totalEntries: Number(meta.totalEntries || entries.length || 0),
     lastUpdated: meta.lastUpdated || collectCatalogLastUpdated(entries),
     recentSyncs: meta.recentSyncs,
     recentEndpoints: buildRecentCatalogEndpoints(meta.recentSyncs),
@@ -586,6 +587,10 @@ async function loadCatalog(env) {
 }
 
 async function loadCatalogEntries(env) {
+  const snapshotEntries = await loadCatalogSnapshot(env);
+  if (snapshotEntries.length) {
+    return snapshotEntries;
+  }
   const keys = await listCatalogEntryKeys(env);
   if (!keys.length) {
     return [];
@@ -595,6 +600,26 @@ async function loadCatalogEntries(env) {
     .map(normalizeStoredCatalogEntry)
     .filter(Boolean)
     .sort((left, right) => compareCatalogEntries(right, left));
+}
+
+async function loadCatalogSnapshot(env) {
+  const raw = await env.MODAL_ROUTER_KV.get(CATALOG_SNAPSHOT_KEY, "json");
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  return raw
+    .map(normalizeStoredCatalogEntry)
+    .filter(Boolean)
+    .sort((left, right) => compareCatalogEntries(right, left));
+}
+
+async function saveCatalogSnapshot(env, entries) {
+  const normalizedEntries = entries
+    .map(normalizeCatalogEntryForStorage)
+    .filter(Boolean)
+    .sort((left, right) => compareCatalogEntries(right, left));
+  await env.MODAL_ROUTER_KV.put(CATALOG_SNAPSHOT_KEY, JSON.stringify(normalizedEntries));
+  return normalizedEntries;
 }
 
 async function listCatalogEntryKeys(env) {
@@ -663,6 +688,8 @@ function normalizeCatalogSyncRecord(raw) {
 
 async function upsertCatalogEntries(env, entries, syncContext) {
   const normalizedEntries = entries.map((entry) => normalizeCatalogEntry(entry, syncContext));
+  const currentSnapshotEntries = await loadCatalogSnapshot(env);
+  const snapshotById = new Map(currentSnapshotEntries.map((entry) => [entry.entryId, entry]));
   const upsertedEntries = await Promise.all(
     normalizedEntries.map(async (entry) => {
       const key = catalogEntryKey(entry.entryId);
@@ -673,14 +700,17 @@ async function upsertCatalogEntries(env, entries, syncContext) {
         createdAtUtc: existing?.createdAtUtc || new Date().toISOString(),
       };
       await env.MODAL_ROUTER_KV.put(key, JSON.stringify(merged));
+      snapshotById.set(merged.entryId, merged);
       return merged;
     })
   );
 
+  const snapshotEntries = await saveCatalogSnapshot(env, [...snapshotById.values()]);
+
   const currentMeta = await loadCatalogMeta(env);
   const nextMeta = {
     ...currentMeta,
-    totalEntries: Math.max(currentMeta.totalEntries || 0, await countCatalogEntries(env)),
+    totalEntries: snapshotEntries.length,
     lastUpdated:
       normalizeOptionalTimestamp(syncContext?.updatedAtUtc) ||
       collectCatalogLastUpdated(upsertedEntries) ||
@@ -712,6 +742,10 @@ async function upsertCatalogEntries(env, entries, syncContext) {
 }
 
 async function countCatalogEntries(env) {
+  const snapshotEntries = await loadCatalogSnapshot(env);
+  if (snapshotEntries.length) {
+    return snapshotEntries.length;
+  }
   const keys = await listCatalogEntryKeys(env);
   return keys.length;
 }
@@ -870,6 +904,17 @@ function normalizeStoredCatalogEntry(raw) {
     bootId: normalizeOptionalText(raw?.bootId),
     lastReason: normalizeOptionalText(raw?.lastReason),
     createdAtUtc: normalizeOptionalTimestamp(raw?.createdAtUtc),
+  };
+}
+
+function normalizeCatalogEntryForStorage(entry) {
+  const normalized = normalizeStoredCatalogEntry(entry);
+  if (!normalized) {
+    return null;
+  }
+  return {
+    ...normalized,
+    createdAtUtc: normalized.createdAtUtc || new Date().toISOString(),
   };
 }
 
