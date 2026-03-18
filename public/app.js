@@ -127,6 +127,7 @@ function renderEndpointList(displayEndpoints) {
     const name = fragment.querySelector(".endpoint-name");
     const url = fragment.querySelector(".endpoint-url");
     const notes = fragment.querySelector(".endpoint-notes");
+    const proxySummary = fragment.querySelector(".endpoint-proxy-summary");
     const activeBadge = fragment.querySelector(".active-badge");
     const disabledBadge = fragment.querySelector(".disabled-badge");
     const registryBadge = fragment.querySelector(".registry-badge");
@@ -134,6 +135,7 @@ function renderEndpointList(displayEndpoints) {
     const liveStatusSummary = fragment.querySelector(".live-status-summary");
     const registrySummary = fragment.querySelector(".registry-summary");
     const endpointLinks = fragment.querySelector(".endpoint-links");
+    const uiLink = fragment.querySelector(".ui-link");
     const statusLink = fragment.querySelector(".status-link");
     const workflowLink = fragment.querySelector(".workflow-link");
     const promptLink = fragment.querySelector(".prompt-link");
@@ -158,6 +160,9 @@ function renderEndpointList(displayEndpoints) {
       registry?.workflowApiEndpoint ||
       "Sem URL reportada.";
     notes.textContent = buildEndpointNotes(endpoint);
+    const proxyPath = buildEndpointProxyPath(endpoint);
+    proxySummary.hidden = !proxyPath;
+    proxySummary.textContent = proxyPath ? `UI Cloudflare: ${proxyPath}` : "";
     activeBadge.hidden = !isConfigured || state.config.activeEndpoint?.id !== endpoint.id;
     disabledBadge.hidden = !isConfigured || endpoint.enabled !== false;
     registryBadge.hidden = !registry;
@@ -180,6 +185,7 @@ function renderEndpointList(displayEndpoints) {
     registrySummary.textContent = summaryText;
 
     const hasLinks = [
+      applyOptionalLink(uiLink, buildEndpointUiUrl(endpoint)),
       applyOptionalLink(statusLink, liveStatus?.statusEndpoint || registry?.statusEndpoint),
       applyOptionalLink(
         workflowLink,
@@ -265,6 +271,21 @@ function buildEndpointNotes(endpoint) {
     parts.push("Registrado pelo Modal. Cadastre este id no roteador para ativar o proxy.");
   }
   return parts.join(" ") || "Sem notas.";
+}
+
+function buildEndpointProxyPath(endpoint) {
+  if (!endpoint?.configured || !endpoint?.proxySlug) {
+    return "";
+  }
+  return `/${endpoint.proxySlug}`;
+}
+
+function buildEndpointUiUrl(endpoint) {
+  const proxyPath = buildEndpointProxyPath(endpoint);
+  if (!proxyPath) {
+    return "";
+  }
+  return `${location.origin}${proxyPath}/`;
 }
 
 function buildRegistrySummary(registry, fallbackEndpointId) {

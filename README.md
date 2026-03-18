@@ -8,11 +8,14 @@ Dashboard + roteador de endpoints do Modal para Cloudflare.
 - mantém uma lista de endpoints do Modal cold start
 - permite escolher qual endpoint está ativo
 - expõe um proxy em `/modal/*` que encaminha para o endpoint ativo
+- expõe cada endpoint configurado em um alias fixo, como `/cmfy_01/`, para abrir a UI do ComfyUI pelo domínio do Cloudflare
 
 Exemplo:
 
 - dashboard: `https://seu-worker.seudominio.workers.dev/`
+- dashboard alternativo: `https://seu-worker.seudominio.workers.dev/dashboard/`
 - proxy: `https://seu-worker.seudominio.workers.dev/modal/api/view`
+- UI do ComfyUI: `https://seu-worker.seudominio.workers.dev/cmfy_01/`
 
 ## Estrutura
 
@@ -69,9 +72,11 @@ npm run deploy
 - `GET /api/health`: mostra o endpoint ativo
 - `POST /api/modal-registry/report`: recebe eventos do Modal e salva o ultimo estado por endpoint
 - `ALL /modal/*`: encaminha para o endpoint ativo
+- `GET /dashboard/`: abre o dashboard administrativo
+- `ALL /cmfy_XX/*`: proxy reverso da UI do ComfyUI para cada endpoint configurado
 
 ## Observação importante
 
 Este scaffold já serve bem para requests HTTP e respostas binárias, como imagens geradas.
 
-Se depois você quiser usar a UI inteira do ComfyUI por trás do proxy, talvez seja necessário ajustar especificamente o fluxo de WebSocket.
+O proxy de UI em `/cmfy_XX/*` já faz rewrite de HTML/CSS e encaminhamento de WebSocket, mas continua sendo um proxy best effort. Se algum componente específico do frontend do ComfyUI usar caminhos absolutos fora dos padrões tratados pelo Worker, pode ser necessário ajustar regras adicionais de rewrite.

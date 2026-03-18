@@ -1,6 +1,8 @@
 const CONFIG_KEY = "router-config";
 const REGISTRY_KEY_PREFIX = "registry:endpoint:";
 const DEFAULT_STATUS_PATH = "/comfyui-modal/status";
+const DASHBOARD_PATH_PREFIX = "/dashboard";
+const PROXY_SLUG_PREFIX = "cmfy_";
 
 const DEFAULT_CONFIG = {
   endpoints: [],
@@ -89,6 +91,19 @@ export default {
 
     if (url.pathname === "/modal" || url.pathname.startsWith("/modal/")) {
       return withCors(await proxyToActiveEndpoint(request, env, url));
+    }
+
+    if (url.pathname === DASHBOARD_PATH_PREFIX) {
+      return Response.redirect(`${url.origin}${DASHBOARD_PATH_PREFIX}/`, 308);
+    }
+
+    if (url.pathname === `${DASHBOARD_PATH_PREFIX}/` || url.pathname.startsWith(`${DASHBOARD_PATH_PREFIX}/`)) {
+      return serveDashboardAsset(request, env, url);
+    }
+
+    const aliasMatch = matchEndpointAliasPath(url.pathname);
+    if (aliasMatch) {
+      return proxyToEndpointAlias(request, env, url, aliasMatch);
     }
 
     return env.ASSETS.fetch(request);
@@ -222,9 +237,10 @@ async function loadConfig(env) {
   if (!raw || typeof raw !== "object") {
     return structuredClone(DEFAULT_CONFIG);
   }
-  const endpoints = Array.isArray(raw.endpoints)
+  const normalizedEndpoints = Array.isArray(raw.endpoints)
     ? raw.endpoints.map(normalizeEndpoint).filter(Boolean)
     : [];
+  const endpoints = assignProxySlugs(normalizedEndpoints, normalizedEndpoints);
   const activeEndpointId =
     typeof raw.activeEndpointId === "string" && raw.activeEndpointId.trim()
       ? raw.activeEndpointId.trim()
@@ -237,7 +253,11 @@ async function loadConfig(env) {
 }
 
 async function saveConfig(env, config) {
-  const normalizedEndpoints = config.endpoints.map(normalizeEndpoint).filter(Boolean);
+  const previousConfig = await loadConfig(env);
+  const normalizedEndpoints = assignProxySlugs(
+    config.endpoints.map(normalizeEndpoint).filter(Boolean),
+    previousConfig.endpoints
+  );
   const normalized = {
     endpoints: normalizedEndpoints,
     activeEndpointId:
@@ -380,6 +400,7 @@ function normalizeEndpoint(endpoint) {
   const notes = String(endpoint?.notes || "").trim();
   const enabled = endpoint?.enabled !== false;
   const url = normalizeUrl(endpoint?.url || "");
+  const proxySlug = normalizeProxySlug(endpoint?.proxySlug);
   if (!id) {
     throw new Error("Cada endpoint precisa de um id.");
   }
@@ -389,7 +410,63 @@ function normalizeEndpoint(endpoint) {
   if (!url) {
     throw new Error(`O endpoint "${name}" precisa de uma URL valida.`);
   }
-  return { id, name, url, notes, enabled };
+  return { id, name, url, notes, enabled, proxySlug };
+}
+
+function normalizeProxySlug(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  if (!raw) {
+    return null;
+  }
+  return /^cmfy_\d+$/.test(raw) ? raw : null;
+}
+
+function assignProxySlugs(endpoints, previousEndpoints = []) {
+  const previousById = new Map(
+    previousEndpoints
+      .map((endpoint) => [endpoint.id, normalizeProxySlug(endpoint.proxySlug)])
+      .filter(([, proxySlug]) => Boolean(proxySlug))
+  );
+  const used = new Set();
+  const nextEndpoints = endpoints.map((endpoint) => ({ ...endpoint }));
+
+  for (const endpoint of nextEndpoints) {
+    const candidate = normalizeProxySlug(endpoint.proxySlug) || previousById.get(endpoint.id) || null;
+    if (!candidate || used.has(candidate)) {
+      continue;
+    }
+    endpoint.proxySlug = candidate;
+    used.add(candidate);
+  }
+
+  let nextIndex = 1;
+  for (const slug of used) {
+    const match = slug.match(/^cmfy_(\d+)$/);
+    const currentIndex = Number.parseInt(match?.[1] || "0", 10);
+    if (currentIndex >= nextIndex) {
+      nextIndex = currentIndex + 1;
+    }
+  }
+
+  for (const endpoint of nextEndpoints) {
+    if (normalizeProxySlug(endpoint.proxySlug)) {
+      continue;
+    }
+    let candidate = formatProxySlug(nextIndex);
+    while (used.has(candidate)) {
+      nextIndex += 1;
+      candidate = formatProxySlug(nextIndex);
+    }
+    endpoint.proxySlug = candidate;
+    used.add(candidate);
+    nextIndex += 1;
+  }
+
+  return nextEndpoints;
+}
+
+function formatProxySlug(index) {
+  return `${PROXY_SLUG_PREFIX}${String(index).padStart(2, "0")}`;
 }
 
 function normalizeUrl(value) {
@@ -694,6 +771,32 @@ function getActiveEndpoint(config) {
   return preferred || config.endpoints.find((endpoint) => endpoint.enabled) || null;
 }
 
+function serveDashboardAsset(request, env, url) {
+  const assetUrl = new URL(request.url);
+  assetUrl.pathname =
+    url.pathname === `${DASHBOARD_PATH_PREFIX}/`
+      ? "/index.html"
+      : url.pathname.slice(DASHBOARD_PATH_PREFIX.length) || "/index.html";
+  return env.ASSETS.fetch(new Request(assetUrl.toString(), request));
+}
+
+function matchEndpointAliasPath(pathname) {
+  const match = pathname.match(/^\/(cmfy_\d+)(\/.*)?$/i);
+  if (!match) {
+    return null;
+  }
+  const proxySlug = normalizeProxySlug(match[1]);
+  if (!proxySlug) {
+    return null;
+  }
+  return {
+    proxySlug,
+    aliasBasePath: `/${proxySlug}`,
+    relativePath: match[2] || "/",
+    isAliasRoot: !match[2],
+  };
+}
+
 async function proxyToActiveEndpoint(request, env, url) {
   const config = await loadConfig(env);
   const active = getActiveEndpoint(config);
@@ -701,17 +804,51 @@ async function proxyToActiveEndpoint(request, env, url) {
     return jsonResponse({ error: "Nenhum endpoint ativo configurado." }, { status: 503 });
   }
 
-  const upstreamUrl = new URL(active.url);
-  const relativePath = url.pathname.replace(/^\/modal\/?/, "");
-  upstreamUrl.pathname = joinPath(upstreamUrl.pathname, relativePath);
-  upstreamUrl.search = url.search;
+  const relativePath = `/${url.pathname.replace(/^\/modal\/?/, "")}`.replace(/\/+$/, (value) =>
+    value.length > 1 ? "/" : value
+  );
+  return proxyEndpointRequest(request, url, active, {
+    requestPath: relativePath,
+    aliasBasePath: null,
+  });
+}
 
+async function proxyToEndpointAlias(request, env, url, aliasMatch) {
+  if (aliasMatch.isAliasRoot && (request.method === "GET" || request.method === "HEAD")) {
+    const redirectUrl = new URL(request.url);
+    redirectUrl.pathname = `${aliasMatch.aliasBasePath}/`;
+    return Response.redirect(redirectUrl.toString(), 308);
+  }
+
+  const config = await loadConfig(env);
+  const endpoint = config.endpoints.find((candidate) => candidate.proxySlug === aliasMatch.proxySlug);
+  if (!endpoint) {
+    return new Response("Endpoint nao encontrado.", { status: 404 });
+  }
+
+  return proxyEndpointRequest(request, url, endpoint, {
+    requestPath: aliasMatch.relativePath,
+    aliasBasePath: aliasMatch.aliasBasePath,
+  });
+}
+
+async function proxyEndpointRequest(request, url, endpoint, options) {
+  const aliasBasePath = options.aliasBasePath || null;
+  const upstreamBaseUrl = new URL(endpoint.url);
+  const upstreamUrl = buildUpstreamRequestUrl(upstreamBaseUrl, options.requestPath, url.search);
   const headers = new Headers(request.headers);
+
   headers.delete("host");
   headers.set("x-forwarded-host", url.host);
   headers.set("x-forwarded-proto", url.protocol.replace(":", ""));
-  headers.set("x-projectmdl-endpoint-id", active.id);
-  headers.set("x-projectmdl-endpoint-name", active.name);
+  if (aliasBasePath) {
+    headers.set("x-forwarded-prefix", aliasBasePath);
+  }
+  headers.set("x-projectmdl-endpoint-id", endpoint.id);
+  headers.set("x-projectmdl-endpoint-name", endpoint.name);
+  if (endpoint.proxySlug) {
+    headers.set("x-projectmdl-proxy-slug", endpoint.proxySlug);
+  }
 
   const upstreamResponse = await fetch(upstreamUrl, {
     method: request.method,
@@ -720,15 +857,129 @@ async function proxyToActiveEndpoint(request, env, url) {
     redirect: "manual",
   });
 
-  const responseHeaders = new Headers(upstreamResponse.headers);
-  responseHeaders.set("x-projectmdl-endpoint-id", active.id);
-  responseHeaders.set("x-projectmdl-endpoint-name", active.name);
+  return buildEndpointProxyResponse({
+    endpoint,
+    url,
+    aliasBasePath,
+    upstreamBaseUrl,
+    upstreamUrl,
+    upstreamResponse,
+  });
+}
 
-  return new Response(upstreamResponse.body, {
-    status: upstreamResponse.status,
-    statusText: upstreamResponse.statusText,
+async function buildEndpointProxyResponse(context) {
+  const responseHeaders = new Headers(context.upstreamResponse.headers);
+  responseHeaders.set("x-projectmdl-endpoint-id", context.endpoint.id);
+  responseHeaders.set("x-projectmdl-endpoint-name", context.endpoint.name);
+  if (context.endpoint.proxySlug) {
+    responseHeaders.set("x-projectmdl-proxy-slug", context.endpoint.proxySlug);
+  }
+
+  rewriteProxyLocationHeader(responseHeaders, context);
+
+  if (!context.aliasBasePath || context.upstreamResponse.status === 101) {
+    return new Response(context.upstreamResponse.body, {
+      status: context.upstreamResponse.status,
+      statusText: context.upstreamResponse.statusText,
+      headers: responseHeaders,
+    });
+  }
+
+  const contentType = responseHeaders.get("content-type") || "";
+  if (isHtmlContentType(contentType)) {
+    const html = await context.upstreamResponse.text();
+    responseHeaders.delete("content-length");
+    responseHeaders.delete("content-security-policy");
+    responseHeaders.delete("content-security-policy-report-only");
+    return new Response(rewriteHtmlDocument(html, context.aliasBasePath), {
+      status: context.upstreamResponse.status,
+      statusText: context.upstreamResponse.statusText,
+      headers: responseHeaders,
+    });
+  }
+
+  if (isCssContentType(contentType)) {
+    const css = await context.upstreamResponse.text();
+    responseHeaders.delete("content-length");
+    return new Response(rewriteCssText(css, context.aliasBasePath), {
+      status: context.upstreamResponse.status,
+      statusText: context.upstreamResponse.statusText,
+      headers: responseHeaders,
+    });
+  }
+
+  return new Response(context.upstreamResponse.body, {
+    status: context.upstreamResponse.status,
+    statusText: context.upstreamResponse.statusText,
     headers: responseHeaders,
   });
+}
+
+function buildUpstreamRequestUrl(upstreamBaseUrl, requestPath, search) {
+  const upstreamUrl = new URL(upstreamBaseUrl.toString());
+  const relativePath = String(requestPath || "/").replace(/^\/+/, "");
+  upstreamUrl.pathname = joinPath(upstreamBaseUrl.pathname, relativePath);
+  upstreamUrl.search = search;
+  return upstreamUrl;
+}
+
+function rewriteProxyLocationHeader(headers, context) {
+  const location = headers.get("location");
+  if (!location || !context.aliasBasePath) {
+    return;
+  }
+  const rewritten = rewriteUpstreamUrlToAlias(location, context);
+  if (rewritten) {
+    headers.set("location", rewritten);
+  }
+}
+
+function rewriteUpstreamUrlToAlias(rawUrl, context) {
+  try {
+    const absoluteUrl = new URL(rawUrl, context.upstreamUrl);
+    if (absoluteUrl.origin !== context.upstreamBaseUrl.origin) {
+      return rawUrl;
+    }
+    const proxiedUrl = new URL(context.url.origin);
+    const proxiedPath = stripBasePath(absoluteUrl.pathname, context.upstreamBaseUrl.pathname);
+    proxiedUrl.pathname =
+      proxiedPath === "/"
+        ? `${context.aliasBasePath}/`
+        : `${context.aliasBasePath}${proxiedPath.startsWith("/") ? proxiedPath : `/${proxiedPath}`}`;
+    proxiedUrl.search = absoluteUrl.search;
+    proxiedUrl.hash = absoluteUrl.hash;
+    return rawUrl.startsWith("/") ? `${proxiedUrl.pathname}${proxiedUrl.search}${proxiedUrl.hash}` : proxiedUrl.toString();
+  } catch {
+    return rawUrl;
+  }
+}
+
+function isHtmlContentType(contentType) {
+  return /\btext\/html\b/i.test(contentType);
+}
+
+function isCssContentType(contentType) {
+  return /\btext\/css\b/i.test(contentType);
+}
+
+function stripBasePath(pathname, basePath) {
+  const normalizedPath = String(pathname || "/") || "/";
+  const normalizedBase = normalizeBasePath(basePath);
+  if (normalizedBase === "/") {
+    return normalizedPath;
+  }
+  if (normalizedPath === normalizedBase) {
+    return "/";
+  }
+  if (normalizedPath.startsWith(`${normalizedBase}/`)) {
+    return normalizedPath.slice(normalizedBase.length) || "/";
+  }
+  return normalizedPath;
+}
+
+function normalizeBasePath(pathname) {
+  const normalizedPath = `/${String(pathname || "").replace(/^\/+/, "").replace(/\/+$/, "")}`;
+  return normalizedPath === "/" ? "/" : normalizedPath;
 }
 
 function joinPath(basePath, extraPath) {
@@ -741,4 +992,119 @@ function joinPath(basePath, extraPath) {
     return `/${right}`;
   }
   return `${left}/${right}`;
+}
+
+function rewriteHtmlDocument(html, aliasBasePath) {
+  const injection = buildProxyBootstrap(aliasBasePath);
+  let rewritten = String(html || "");
+
+  rewritten = rewritten.replace(
+    /\b(href|src|action|poster)=("|')\/(?!\/)/gi,
+    `$1=$2${aliasBasePath}/`
+  );
+  rewritten = rewritten.replace(/url\((['"]?)\/(?!\/)/gi, `url($1${aliasBasePath}/`);
+  rewritten = rewritten.replace(/\bcontent=(["'])\/(?!\/)/gi, `content=$1${aliasBasePath}/`);
+  rewritten = rewritten.replace(/\bsrcset=(["'])(.*?)\1/gi, (_, quote, value) => {
+    return `srcset=${quote}${rewriteSrcsetValue(value, aliasBasePath)}${quote}`;
+  });
+
+  rewritten = rewritten.replace(
+    /(<head\b[^>]*>)/i,
+    `$1<base href="${aliasBasePath}/" />${injection}`
+  );
+  if (!/<head\b/i.test(rewritten)) {
+    rewritten = `${injection}${rewritten}`;
+  }
+
+  return rewritten;
+}
+
+function rewriteCssText(css, aliasBasePath) {
+  return String(css || "")
+    .replace(/url\((['"]?)\/(?!\/)/gi, `url($1${aliasBasePath}/`)
+    .replace(/@import\s+(["'])\/(?!\/)/gi, `@import $1${aliasBasePath}/`);
+}
+
+function rewriteSrcsetValue(value, aliasBasePath) {
+  return String(value || "")
+    .split(",")
+    .map((entry) => {
+      const trimmed = entry.trim();
+      if (!trimmed || !trimmed.startsWith("/")) {
+        return trimmed;
+      }
+      const firstSpace = trimmed.search(/\s/);
+      if (firstSpace === -1) {
+        return `${aliasBasePath}${trimmed}`;
+      }
+      return `${aliasBasePath}${trimmed.slice(0, firstSpace)}${trimmed.slice(firstSpace)}`;
+    })
+    .join(", ");
+}
+
+function buildProxyBootstrap(aliasBasePath) {
+  const aliasPathLiteral = JSON.stringify(aliasBasePath);
+  return [
+    "<script>",
+    "(function(){",
+    "if(window.__projectmdlProxyPatched)return;",
+    "window.__projectmdlProxyPatched=true;",
+    `const base=${aliasPathLiteral};`,
+    "const root=base+'/';",
+    "const origin=location.origin;",
+    "const prefix=function(value){",
+    "if(value===undefined||value===null)return value;",
+    "const raw=String(value);",
+    "if(!raw||raw.startsWith('#')||raw.startsWith('data:')||raw.startsWith('blob:')||raw.startsWith('javascript:')||raw.startsWith('mailto:'))return value;",
+    "if(raw===base||raw.startsWith(root)||raw.startsWith(base+'?'))return raw;",
+    "if(raw.startsWith('//'))return raw;",
+    "try{",
+    "const abs=new URL(raw,location.href);",
+    "if(abs.origin!==origin)return raw;",
+    "if(abs.pathname===base||abs.pathname.startsWith(root))return raw;",
+    "abs.pathname=abs.pathname==='/'?root:base+abs.pathname;",
+    "return raw.startsWith('/')?abs.pathname+abs.search+abs.hash:abs.toString();",
+    "}catch(_error){return raw;}",
+    "};",
+    "const prefixSrcset=function(value){",
+    "return String(value||'').split(',').map(function(entry){",
+    "const trimmed=entry.trim();",
+    "if(!trimmed||!trimmed.startsWith('/'))return trimmed;",
+    "const idx=trimmed.search(/\\s/);",
+    "return idx===-1?base+trimmed:base+trimmed.slice(0,idx)+trimmed.slice(idx);",
+    "}).join(', ');",
+    "};",
+    "const patchProperty=function(Ctor,name,mapper){",
+    "if(!Ctor||!Ctor.prototype)return;",
+    "const descriptor=Object.getOwnPropertyDescriptor(Ctor.prototype,name);",
+    "if(!descriptor||typeof descriptor.set!=='function')return;",
+    "Object.defineProperty(Ctor.prototype,name,{configurable:true,enumerable:descriptor.enumerable,get:descriptor.get,set:function(value){return descriptor.set.call(this,(mapper||prefix)(value));}});",
+    "};",
+    "const nativeFetch=window.fetch;",
+    "if(nativeFetch){window.fetch=function(input,init){if(typeof input==='string'||input instanceof URL){return nativeFetch.call(this,prefix(input),init);}if(input&&typeof Request!=='undefined'&&input instanceof Request){return nativeFetch.call(this,new Request(prefix(input.url),input),init);}return nativeFetch.call(this,input,init);};}",
+    "const NativeWS=window.WebSocket;",
+    "if(NativeWS){const WrappedWS=function(url,protocols){return protocols===undefined?new NativeWS(prefix(url)):new NativeWS(prefix(url),protocols);};WrappedWS.prototype=NativeWS.prototype;Object.setPrototypeOf(WrappedWS,NativeWS);window.WebSocket=WrappedWS;}",
+    "const NativeES=window.EventSource;",
+    "if(NativeES){const WrappedES=function(url,config){return config===undefined?new NativeES(prefix(url)):new NativeES(prefix(url),config);};WrappedES.prototype=NativeES.prototype;Object.setPrototypeOf(WrappedES,NativeES);window.EventSource=WrappedES;}",
+    "const xhrOpen=XMLHttpRequest.prototype.open;",
+    "XMLHttpRequest.prototype.open=function(method,url){const args=[method,prefix(url)].concat(Array.prototype.slice.call(arguments,2));return xhrOpen.apply(this,args);};",
+    "const wrapHistory=function(name){const original=history[name];if(!original)return;history[name]=function(state,title,url){return original.call(this,state,title,prefix(url));};};",
+    "wrapHistory('pushState');",
+    "wrapHistory('replaceState');",
+    "const nativeOpen=window.open;",
+    "if(nativeOpen){window.open=function(url,target,features){return nativeOpen.call(this,prefix(url),target,features);};}",
+    "const nativeSetAttribute=Element.prototype.setAttribute;",
+    "Element.prototype.setAttribute=function(name,value){if(typeof name==='string'&&/^(href|src|action|poster)$/i.test(name)){return nativeSetAttribute.call(this,name,prefix(value));}if(String(name).toLowerCase()==='srcset'){return nativeSetAttribute.call(this,name,prefixSrcset(value));}return nativeSetAttribute.call(this,name,value);};",
+    "patchProperty(window.HTMLAnchorElement,'href');",
+    "patchProperty(window.HTMLLinkElement,'href');",
+    "patchProperty(window.HTMLImageElement,'src');",
+    "patchProperty(window.HTMLScriptElement,'src');",
+    "patchProperty(window.HTMLIFrameElement,'src');",
+    "patchProperty(window.HTMLFormElement,'action');",
+    "patchProperty(window.HTMLSourceElement,'src');",
+    "patchProperty(window.HTMLSourceElement,'srcset',prefixSrcset);",
+    "patchProperty(window.HTMLMediaElement,'poster');",
+    "})();",
+    "</script>",
+  ].join("");
 }

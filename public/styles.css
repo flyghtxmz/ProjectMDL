@@ -306,6 +306,12 @@ button:disabled {
   min-height: 1.55em;
 }
 
+.endpoint-proxy-summary {
+  color: #d6f6ff;
+  line-height: 1.55;
+  font-size: 13px;
+}
+
 .endpoint-actions {
   display: flex;
   flex-wrap: wrap;
