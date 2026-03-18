@@ -11,6 +11,7 @@ const state = {
   },
   endpointStatusesById: {},
   lastStatusProbeAtUtc: null,
+  refreshingEndpointIds: {},
 };
 
 const elements = {
@@ -138,12 +139,15 @@ function renderEndpointList(displayEndpoints) {
     const promptLink = fragment.querySelector(".prompt-link");
     const publicLink = fragment.querySelector(".public-link");
     const actions = fragment.querySelector(".endpoint-actions");
+    const refreshStatusButton = fragment.querySelector(".refresh-status-button");
     const activateButton = fragment.querySelector(".activate-button");
     const editButton = fragment.querySelector(".edit-button");
     const deleteButton = fragment.querySelector(".delete-button");
     const registry = endpoint.registry || null;
     const liveStatus = state.endpointStatusesById[endpoint.id] || null;
     const isConfigured = endpoint.configured !== false;
+    const canRefresh = canRefreshEndpointStatus(endpoint, liveStatus);
+    const isRefreshing = state.refreshingEndpointIds[endpoint.id] === true;
 
     name.textContent = endpoint.name;
     url.textContent =
@@ -158,9 +162,11 @@ function renderEndpointList(displayEndpoints) {
     disabledBadge.hidden = !isConfigured || endpoint.enabled !== false;
     registryBadge.hidden = !registry;
     unmanagedBadge.hidden = isConfigured || !registry;
+    refreshStatusButton.hidden = !canRefresh;
+    refreshStatusButton.disabled = isRefreshing;
     activateButton.disabled =
       !isConfigured || !endpoint.enabled || state.config.activeEndpoint?.id === endpoint.id;
-    actions.hidden = !isConfigured;
+    actions.hidden = !isConfigured && !canRefresh;
     activateButton.hidden = !isConfigured;
     editButton.hidden = !isConfigured;
     deleteButton.hidden = !isConfigured;
@@ -183,6 +189,12 @@ function renderEndpointList(displayEndpoints) {
       applyOptionalLink(publicLink, liveStatus?.publicBaseUrl || registry?.publicBaseUrl || endpoint.url),
     ].some(Boolean);
     endpointLinks.hidden = !hasLinks;
+
+    if (canRefresh) {
+      refreshStatusButton.addEventListener("click", () =>
+        refreshSingleEndpointStatus(endpoint.id, endpoint.name)
+      );
+    }
 
     if (isConfigured) {
       activateButton.addEventListener("click", () => activateEndpoint(endpoint.id));
@@ -325,6 +337,16 @@ function buildLiveStatusSummary(liveStatus) {
   return parts.join(" | ");
 }
 
+function canRefreshEndpointStatus(endpoint, liveStatus) {
+  return Boolean(
+    endpoint?.url ||
+      endpoint?.registry?.publicBaseUrl ||
+      endpoint?.registry?.statusEndpoint ||
+      liveStatus?.publicBaseUrl ||
+      liveStatus?.statusEndpoint
+  );
+}
+
 function applyOptionalLink(anchor, url) {
   if (!url) {
     anchor.hidden = true;
@@ -429,6 +451,22 @@ async function activateEndpoint(endpointId) {
     setStatus(`Endpoint ativo: ${payload.activeEndpoint?.name || "nenhum"}.`);
   } catch (error) {
     setStatus(error.message, true);
+  }
+}
+
+async function refreshSingleEndpointStatus(endpointId, endpointName) {
+  state.refreshingEndpointIds[endpointId] = true;
+  render();
+  try {
+    const payload = await api(`/api/endpoints/${endpointId}/status`);
+    state.endpointStatusesById[endpointId] = payload;
+    state.lastStatusProbeAtUtc = payload.checkedAtUtc || new Date().toISOString();
+    setStatus(`Status atualizado: ${endpointName || endpointId}.`);
+  } catch (error) {
+    setStatus(`Falha ao atualizar ${endpointName || endpointId}: ${error.message}`, true);
+  } finally {
+    delete state.refreshingEndpointIds[endpointId];
+    render();
   }
 }
 

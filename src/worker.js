@@ -47,6 +47,13 @@ export default {
       return withCors(jsonResponse(await buildEndpointStatusesPayload(env)));
     }
 
+    if (url.pathname.startsWith("/api/endpoints/") && url.pathname.endsWith("/status")) {
+      if (request.method !== "GET") {
+        return withCors(methodNotAllowed(["GET"]));
+      }
+      return withCors(await handleSingleEndpointStatus(url.pathname, env));
+    }
+
     if (url.pathname === "/api/modal-registry/report") {
       if (request.method !== "POST") {
         return withCors(methodNotAllowed(["POST"]));
@@ -122,6 +129,20 @@ async function buildEndpointStatusesPayload(env) {
     probedAtUtc: new Date().toISOString(),
     statusesByEndpointId,
   };
+}
+
+async function handleSingleEndpointStatus(pathname, env) {
+  const match = pathname.match(/^\/api\/endpoints\/([^/]+)\/status$/);
+  const endpointId = match?.[1];
+  if (!endpointId) {
+    return jsonResponse({ error: "Endpoint invalido." }, { status: 400 });
+  }
+  const [config, registryByEndpointId] = await Promise.all([loadConfig(env), loadRegistry(env)]);
+  const target = findEndpointProbeTarget(endpointId, config, registryByEndpointId);
+  if (!target) {
+    return jsonResponse({ error: "Endpoint nao encontrado ou sem status configurado." }, { status: 404 });
+  }
+  return jsonResponse(await probeEndpointStatus(target));
 }
 
 function jsonResponse(data, init = {}) {
@@ -539,6 +560,28 @@ function buildEndpointProbeTargets(config, registryByEndpointId) {
   }
 
   return targets;
+}
+
+function findEndpointProbeTarget(endpointId, config, registryByEndpointId) {
+  const configEndpoint = config.endpoints.find((endpoint) => endpoint.id === endpointId);
+  if (configEndpoint) {
+    return buildProbeTarget(
+      configEndpoint.id,
+      configEndpoint.name,
+      configEndpoint.url,
+      registryByEndpointId[configEndpoint.id] || null
+    );
+  }
+  const registry = registryByEndpointId[endpointId];
+  if (!registry) {
+    return null;
+  }
+  return buildProbeTarget(
+    registry.endpointId,
+    registry.endpointLabel || registry.endpointId,
+    registry.publicBaseUrl,
+    registry
+  );
 }
 
 function buildProbeTarget(endpointId, endpointLabel, baseUrl, registry) {
