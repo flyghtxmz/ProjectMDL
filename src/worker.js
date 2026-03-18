@@ -1,8 +1,11 @@
 const CONFIG_KEY = "router-config";
 const REGISTRY_KEY_PREFIX = "registry:endpoint:";
+const CATALOG_ENTRY_KEY_PREFIX = "catalog:entry:";
+const CATALOG_META_KEY = "catalog:meta";
 const DEFAULT_STATUS_PATH = "/comfyui-modal/status";
 const DASHBOARD_PATH_PREFIX = "/dashboard";
 const PROXY_SLUG_PREFIX = "cmfy_";
+const MAX_RECENT_CATALOG_SYNCS = 12;
 
 const DEFAULT_CONFIG = {
   endpoints: [],
@@ -40,6 +43,23 @@ export default {
         return withCors(await handleConfigWrite(request, env));
       }
       return withCors(methodNotAllowed(["GET", "PUT"]));
+    }
+
+    if (url.pathname === "/api/catalog") {
+      if (request.method === "GET") {
+        return withCors(jsonResponse(await buildCatalogPayload(env)));
+      }
+      if (request.method === "PUT") {
+        return withCors(await handleCatalogSave(request, env));
+      }
+      return withCors(methodNotAllowed(["GET", "PUT"]));
+    }
+
+    if (url.pathname === "/api/catalog/import") {
+      if (request.method !== "POST") {
+        return withCors(methodNotAllowed(["POST"]));
+      }
+      return withCors(await handleCatalogImport(request, env));
     }
 
     if (url.pathname === "/api/endpoint-statuses") {
@@ -111,13 +131,19 @@ export default {
 };
 
 async function buildHealthPayload(env) {
-  const [config, registryByEndpointId] = await Promise.all([loadConfig(env), loadRegistry(env)]);
+  const [config, registryByEndpointId, catalogMeta] = await Promise.all([
+    loadConfig(env),
+    loadRegistry(env),
+    loadCatalogMeta(env),
+  ]);
   return {
     ok: true,
     endpointCount: config.endpoints.length,
     activeEndpoint: getActiveEndpoint(config),
     updatedAt: config.updatedAt,
     registryEndpointCount: Object.keys(registryByEndpointId).length,
+    catalogEntryCount: Number(catalogMeta.totalEntries || 0),
+    catalogLastUpdated: catalogMeta.lastUpdated || null,
   };
 }
 
@@ -191,6 +217,9 @@ function methodNotAllowed(allowedMethods) {
 }
 
 function requireAdmin(request, env) {
+  if (!isAuthEnabled(env, "ENABLE_DASHBOARD_AUTH")) {
+    return null;
+  }
   const configuredSecret = (env.DASHBOARD_ADMIN_TOKEN || "").trim();
   if (!configuredSecret) {
     return null;
@@ -203,6 +232,9 @@ function requireAdmin(request, env) {
 }
 
 function requireRegistryReporter(request, env) {
+  if (!isAuthEnabled(env, "ENABLE_REGISTRY_AUTH")) {
+    return null;
+  }
   const configuredSecret = (env.MODAL_REGISTRY_TOKEN || "").trim();
   if (!configuredSecret) {
     return new Response("Registry token not configured.", { status: 503 });
@@ -212,6 +244,12 @@ function requireRegistryReporter(request, env) {
     return null;
   }
   return new Response("Unauthorized", { status: 401 });
+}
+
+function isAuthEnabled(env, envVarName) {
+  return String(env?.[envVarName] || "")
+    .trim()
+    .toLowerCase() === "true";
 }
 
 function readCandidateToken(request, directHeaderName) {
@@ -339,6 +377,397 @@ async function handleRegistryReport(request, env) {
     lastEventType: merged.lastEventType,
     reportCount: merged.reportCount,
   });
+}
+
+async function buildCatalogPayload(env) {
+  const { entries, meta } = await loadCatalog(env);
+  return {
+    ok: true,
+    entries,
+    totalEntries: entries.length,
+    lastUpdated: meta.lastUpdated || collectCatalogLastUpdated(entries),
+    recentSyncs: meta.recentSyncs,
+    recentEndpoints: buildRecentCatalogEndpoints(meta.recentSyncs),
+  };
+}
+
+async function handleCatalogImport(request, env) {
+  let payload;
+  try {
+    payload = await request.json();
+  } catch {
+    return jsonResponse({ error: "JSON invalido." }, { status: 400 });
+  }
+
+  let normalized;
+  try {
+    normalized = normalizeCatalogImportPayload(payload);
+  } catch (error) {
+    return jsonResponse({ error: error.message }, { status: 400 });
+  }
+
+  const result = await upsertCatalogEntries(env, normalized.entries, {
+    source: normalized.source,
+    app: normalized.app,
+    endpointId: normalized.endpointId,
+    endpointLabel: normalized.endpointLabel,
+    bootId: normalized.bootId,
+    updatedAtUtc: normalized.updatedAtUtc,
+    reason: normalized.reason,
+    received: normalized.entries.length,
+  });
+
+  return jsonResponse({
+    ok: true,
+    received: normalized.entries.length,
+    upserted: result.upserted,
+  });
+}
+
+async function handleCatalogSave(request, env) {
+  let payload;
+  try {
+    payload = await request.json();
+  } catch {
+    return jsonResponse({ error: "JSON invalido." }, { status: 400 });
+  }
+
+  const entries = Array.isArray(payload?.entries) ? payload.entries : null;
+  if (!entries) {
+    return jsonResponse({ error: "O campo entries deve ser uma lista." }, { status: 400 });
+  }
+
+  let normalizedEntries;
+  try {
+    normalizedEntries = entries.map((entry) =>
+      normalizeCatalogEntry(entry, {
+        source: "dashboard",
+        app: "projectmdl-dashboard",
+        endpointId: entry?.sourceEndpointId || null,
+        endpointLabel: entry?.sourceEndpointLabel || null,
+        bootId: entry?.bootId || null,
+        updatedAtUtc: payload?.updatedAtUtc || new Date().toISOString(),
+        reason: "manual",
+      })
+    );
+  } catch (error) {
+    return jsonResponse({ error: error.message }, { status: 400 });
+  }
+
+  const result = await upsertCatalogEntries(env, normalizedEntries, {
+    source: "dashboard",
+    app: "projectmdl-dashboard",
+    endpointId: null,
+    endpointLabel: "Dashboard",
+    bootId: null,
+    updatedAtUtc: payload?.updatedAtUtc || new Date().toISOString(),
+    reason: "manual",
+    received: normalizedEntries.length,
+  });
+
+  return jsonResponse({
+    ok: true,
+    received: normalizedEntries.length,
+    upserted: result.upserted,
+  });
+}
+
+async function loadCatalog(env) {
+  const [entries, meta] = await Promise.all([loadCatalogEntries(env), loadCatalogMeta(env)]);
+  return { entries, meta };
+}
+
+async function loadCatalogEntries(env) {
+  const keys = await listCatalogEntryKeys(env);
+  if (!keys.length) {
+    return [];
+  }
+  const rawEntries = await Promise.all(keys.map((key) => env.MODAL_ROUTER_KV.get(key, "json")));
+  return rawEntries
+    .map(normalizeStoredCatalogEntry)
+    .filter(Boolean)
+    .sort((left, right) => compareCatalogEntries(right, left));
+}
+
+async function listCatalogEntryKeys(env) {
+  const names = [];
+  let cursor = undefined;
+  do {
+    const page = await env.MODAL_ROUTER_KV.list({
+      prefix: CATALOG_ENTRY_KEY_PREFIX,
+      cursor,
+    });
+    for (const entry of page.keys) {
+      names.push(entry.name);
+    }
+    cursor = page.list_complete ? undefined : page.cursor;
+  } while (cursor);
+  return names;
+}
+
+async function loadCatalogMeta(env) {
+  const raw = await env.MODAL_ROUTER_KV.get(CATALOG_META_KEY, "json");
+  return normalizeCatalogMeta(raw);
+}
+
+async function saveCatalogMeta(env, meta) {
+  const normalized = normalizeCatalogMeta(meta);
+  await env.MODAL_ROUTER_KV.put(CATALOG_META_KEY, JSON.stringify(normalized));
+  return normalized;
+}
+
+function normalizeCatalogMeta(raw) {
+  const recentSyncs = Array.isArray(raw?.recentSyncs)
+    ? raw.recentSyncs
+        .map(normalizeCatalogSyncRecord)
+        .filter(Boolean)
+        .slice(0, MAX_RECENT_CATALOG_SYNCS)
+    : [];
+  return {
+    totalEntries: normalizeOptionalInteger(raw?.totalEntries) || 0,
+    lastUpdated: normalizeOptionalTimestamp(raw?.lastUpdated),
+    recentSyncs,
+  };
+}
+
+function normalizeCatalogSyncRecord(raw) {
+  const syncedAtUtc = normalizeOptionalTimestamp(raw?.syncedAtUtc);
+  const source = normalizeOptionalText(raw?.source);
+  const app = normalizeOptionalText(raw?.app);
+  const endpointId = normalizeOptionalText(raw?.endpointId);
+  const endpointLabel = normalizeOptionalText(raw?.endpointLabel);
+  if (!syncedAtUtc && !endpointId && !source && !app) {
+    return null;
+  }
+  return {
+    syncedAtUtc,
+    source,
+    app,
+    endpointId,
+    endpointLabel,
+    bootId: normalizeOptionalText(raw?.bootId),
+    updatedAtUtc: normalizeOptionalTimestamp(raw?.updatedAtUtc),
+    reason: normalizeOptionalText(raw?.reason),
+    received: normalizeOptionalInteger(raw?.received) || 0,
+    upserted: normalizeOptionalInteger(raw?.upserted) || 0,
+  };
+}
+
+async function upsertCatalogEntries(env, entries, syncContext) {
+  const normalizedEntries = entries.map((entry) => normalizeCatalogEntry(entry, syncContext));
+  const upsertedEntries = await Promise.all(
+    normalizedEntries.map(async (entry) => {
+      const key = catalogEntryKey(entry.entryId);
+      const existing = normalizeStoredCatalogEntry(await env.MODAL_ROUTER_KV.get(key, "json"));
+      const merged = {
+        ...existing,
+        ...entry,
+        createdAtUtc: existing?.createdAtUtc || new Date().toISOString(),
+      };
+      await env.MODAL_ROUTER_KV.put(key, JSON.stringify(merged));
+      return merged;
+    })
+  );
+
+  const currentMeta = await loadCatalogMeta(env);
+  const nextMeta = {
+    ...currentMeta,
+    totalEntries: Math.max(currentMeta.totalEntries || 0, await countCatalogEntries(env)),
+    lastUpdated:
+      normalizeOptionalTimestamp(syncContext?.updatedAtUtc) ||
+      collectCatalogLastUpdated(upsertedEntries) ||
+      new Date().toISOString(),
+    recentSyncs: [
+      normalizeCatalogSyncRecord({
+        syncedAtUtc: new Date().toISOString(),
+        source: syncContext?.source,
+        app: syncContext?.app,
+        endpointId: syncContext?.endpointId,
+        endpointLabel: syncContext?.endpointLabel,
+        bootId: syncContext?.bootId,
+        updatedAtUtc: syncContext?.updatedAtUtc,
+        reason: syncContext?.reason,
+        received: syncContext?.received || normalizedEntries.length,
+        upserted: normalizedEntries.length,
+      }),
+      ...(currentMeta.recentSyncs || []),
+    ]
+      .filter(Boolean)
+      .slice(0, MAX_RECENT_CATALOG_SYNCS),
+  };
+  await saveCatalogMeta(env, nextMeta);
+
+  return {
+    upserted: normalizedEntries.length,
+    entries: upsertedEntries,
+  };
+}
+
+async function countCatalogEntries(env) {
+  const keys = await listCatalogEntryKeys(env);
+  return keys.length;
+}
+
+function normalizeCatalogImportPayload(payload) {
+  const entries = Array.isArray(payload?.entries) ? payload.entries : null;
+  if (!entries) {
+    throw new Error("O campo entries deve ser uma lista.");
+  }
+  return {
+    source: normalizeOptionalText(payload?.source) || "comfyui-modal",
+    app: normalizeOptionalText(payload?.app) || "comfyui-modal",
+    endpointId: normalizeOptionalText(payload?.endpoint_id),
+    endpointLabel: normalizeOptionalText(payload?.endpoint_label),
+    bootId: normalizeOptionalText(payload?.boot_id),
+    updatedAtUtc: normalizeOptionalTimestamp(payload?.updated_at_utc) || new Date().toISOString(),
+    reason: normalizeOptionalText(payload?.reason) || "catalog-update",
+    entryCount: normalizeOptionalInteger(payload?.entry_count) || entries.length,
+    entries: entries.map((entry) =>
+      normalizeCatalogEntry(entry, {
+        source: payload?.source,
+        app: payload?.app,
+        endpointId: payload?.endpoint_id,
+        endpointLabel: payload?.endpoint_label,
+        bootId: payload?.boot_id,
+        updatedAtUtc: payload?.updated_at_utc,
+        reason: payload?.reason,
+      })
+    ),
+  };
+}
+
+function normalizeCatalogEntry(entry, context = {}) {
+  const entryId =
+    normalizeOptionalText(entry?.entryId) ||
+    normalizeOptionalText(entry?.entry_id) ||
+    buildCatalogEntryId(entry);
+  const filename =
+    normalizeOptionalText(entry?.filename) ||
+    normalizeOptionalText(entry?.savedPath) ||
+    normalizeOptionalText(entry?.saved_path) ||
+    entryId;
+  const url = normalizeOptionalUrl(entry?.url);
+  if (!filename) {
+    throw new Error("Cada entrada do catalogo precisa de filename.");
+  }
+  if (!url) {
+    throw new Error(`A entrada "${filename}" precisa de uma URL valida.`);
+  }
+  return {
+    entryId,
+    provider: normalizeOptionalText(entry?.provider) || "outro",
+    url,
+    filename,
+    category: normalizeOptionalText(entry?.category) || "geral",
+    subdir: normalizeOptionalText(entry?.subdir) || "",
+    savedPath: normalizeOptionalText(entry?.savedPath) || normalizeOptionalText(entry?.saved_path),
+    timestampUtc:
+      normalizeOptionalTimestamp(entry?.timestampUtc) ||
+      normalizeOptionalTimestamp(entry?.timestamp_utc) ||
+      normalizeOptionalTimestamp(context?.updatedAtUtc) ||
+      new Date().toISOString(),
+    updatedAtUtc:
+      normalizeOptionalTimestamp(entry?.updatedAtUtc) ||
+      normalizeOptionalTimestamp(context?.updatedAtUtc) ||
+      normalizeOptionalTimestamp(entry?.timestampUtc) ||
+      normalizeOptionalTimestamp(entry?.timestamp_utc) ||
+      new Date().toISOString(),
+    source: normalizeOptionalText(entry?.source) || normalizeOptionalText(context?.source) || "manual",
+    app: normalizeOptionalText(entry?.app) || normalizeOptionalText(context?.app),
+    sourceEndpointId:
+      normalizeOptionalText(entry?.sourceEndpointId) || normalizeOptionalText(context?.endpointId),
+    sourceEndpointLabel:
+      normalizeOptionalText(entry?.sourceEndpointLabel) ||
+      normalizeOptionalText(context?.endpointLabel),
+    bootId: normalizeOptionalText(entry?.bootId) || normalizeOptionalText(context?.bootId),
+    lastReason:
+      normalizeOptionalText(entry?.lastReason) || normalizeOptionalText(context?.reason) || "manual",
+  };
+}
+
+function normalizeStoredCatalogEntry(raw) {
+  const entryId = normalizeOptionalText(raw?.entryId);
+  if (!entryId) {
+    return null;
+  }
+  const url = normalizeOptionalUrl(raw?.url);
+  if (!url) {
+    return null;
+  }
+  return {
+    entryId,
+    provider: normalizeOptionalText(raw?.provider) || "outro",
+    url,
+    filename: normalizeOptionalText(raw?.filename) || entryId,
+    category: normalizeOptionalText(raw?.category) || "geral",
+    subdir: normalizeOptionalText(raw?.subdir) || "",
+    savedPath: normalizeOptionalText(raw?.savedPath),
+    timestampUtc: normalizeOptionalTimestamp(raw?.timestampUtc),
+    updatedAtUtc: normalizeOptionalTimestamp(raw?.updatedAtUtc),
+    source: normalizeOptionalText(raw?.source),
+    app: normalizeOptionalText(raw?.app),
+    sourceEndpointId: normalizeOptionalText(raw?.sourceEndpointId),
+    sourceEndpointLabel: normalizeOptionalText(raw?.sourceEndpointLabel),
+    bootId: normalizeOptionalText(raw?.bootId),
+    lastReason: normalizeOptionalText(raw?.lastReason),
+    createdAtUtc: normalizeOptionalTimestamp(raw?.createdAtUtc),
+  };
+}
+
+function catalogEntryKey(entryId) {
+  return `${CATALOG_ENTRY_KEY_PREFIX}${entryId}`;
+}
+
+function buildCatalogEntryId(entry) {
+  const basis = [
+    normalizeOptionalText(entry?.url) || "",
+    normalizeOptionalText(entry?.filename) || "",
+    normalizeOptionalText(entry?.category) || "",
+    normalizeOptionalText(entry?.subdir) || "",
+  ].join("|");
+  return `catalog_${hashStableText(basis || crypto.randomUUID())}`;
+}
+
+function hashStableText(value) {
+  let hash = 2166136261;
+  for (const character of String(value || "")) {
+    hash ^= character.charCodeAt(0);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+function collectCatalogLastUpdated(entries) {
+  const timestamps = entries
+    .map((entry) => normalizeOptionalTimestamp(entry?.updatedAtUtc || entry?.timestampUtc))
+    .filter(Boolean)
+    .sort();
+  return timestamps.at(-1) || null;
+}
+
+function buildRecentCatalogEndpoints(recentSyncs) {
+  const seen = new Set();
+  const endpoints = [];
+  for (const sync of recentSyncs || []) {
+    const endpointId = normalizeOptionalText(sync?.endpointId);
+    if (!endpointId || seen.has(endpointId)) {
+      continue;
+    }
+    seen.add(endpointId);
+    endpoints.push({
+      endpointId,
+      endpointLabel: normalizeOptionalText(sync?.endpointLabel) || endpointId,
+      updatedAtUtc: normalizeOptionalTimestamp(sync?.updatedAtUtc) || sync?.syncedAtUtc,
+      reason: normalizeOptionalText(sync?.reason),
+    });
+  }
+  return endpoints;
+}
+
+function compareCatalogEntries(left, right) {
+  const leftUpdated = left?.updatedAtUtc || left?.timestampUtc || "";
+  const rightUpdated = right?.updatedAtUtc || right?.timestampUtc || "";
+  return String(leftUpdated).localeCompare(String(rightUpdated));
 }
 
 async function handleConfigWrite(request, env) {

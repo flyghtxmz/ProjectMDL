@@ -42,6 +42,7 @@ body {
 
 code,
 input,
+select,
 textarea,
 button {
   font: inherit;
@@ -169,6 +170,12 @@ h1 {
   font-size: 13px;
 }
 
+.panel-subtitle {
+  color: var(--muted);
+  font-size: 13px;
+  margin-top: 4px;
+}
+
 .stack {
   display: grid;
   gap: 14px;
@@ -185,6 +192,7 @@ h1 {
 }
 
 input,
+select,
 textarea {
   width: 100%;
   padding: 13px 14px;
@@ -197,6 +205,7 @@ textarea {
 }
 
 input:focus,
+select:focus,
 textarea:focus {
   border-color: rgba(140, 224, 255, 0.5);
   background: rgba(255, 255, 255, 0.06);
@@ -218,6 +227,27 @@ textarea {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
+}
+
+.overview-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.overview-card {
+  display: grid;
+  gap: 8px;
+  padding: 14px 16px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(155, 177, 194, 0.1);
+}
+
+.overview-card strong {
+  font-size: 22px;
+  letter-spacing: -0.03em;
 }
 
 button {
@@ -385,6 +415,89 @@ button:disabled {
   background: rgba(255, 255, 255, 0.1);
 }
 
+.catalog-panel {
+  margin-top: 20px;
+}
+
+.catalog-toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) repeat(2, minmax(180px, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.compact-field span {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.catalog-sync-summary {
+  margin-bottom: 14px;
+  padding: 12px 14px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.catalog-table-wrap {
+  overflow-x: auto;
+  border-radius: 18px;
+  border: 1px solid rgba(155, 177, 194, 0.12);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.catalog-table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 1100px;
+}
+
+.catalog-table th,
+.catalog-table td {
+  padding: 12px 14px;
+  border-bottom: 1px solid rgba(155, 177, 194, 0.08);
+  text-align: left;
+  vertical-align: top;
+}
+
+.catalog-table th {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.catalog-input {
+  min-width: 140px;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.catalog-link-cell {
+  display: grid;
+  gap: 8px;
+  min-width: 280px;
+}
+
+.catalog-meta-cell {
+  color: var(--muted);
+  line-height: 1.5;
+  min-width: 180px;
+}
+
+.catalog-empty {
+  color: var(--muted);
+  text-align: center;
+  padding: 22px !important;
+}
+
+.catalog-row-dirty td {
+  background: rgba(140, 224, 255, 0.05);
+}
+
 @media (max-width: 900px) {
   .hero,
   .grid,
@@ -394,5 +507,10 @@ button:disabled {
 
   .endpoint-actions {
     justify-content: flex-start;
+  }
+
+  .overview-grid,
+  .catalog-toolbar {
+    grid-template-columns: 1fr;
   }
 }

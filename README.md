@@ -9,6 +9,7 @@ Dashboard + roteador de endpoints do Modal para Cloudflare.
 - permite escolher qual endpoint está ativo
 - expõe um proxy em `/modal/*` que encaminha para o endpoint ativo
 - expõe cada endpoint configurado em um alias fixo, como `/cmfy_01/`, para abrir a UI do ComfyUI pelo domínio do Cloudflare
+- mantém um catálogo central persistente de modelos/downloads recebido dos apps do ComfyUI/Modal
 
 Exemplo:
 
@@ -70,10 +71,22 @@ npm run deploy
 - `PUT /api/config`: salva a lista de endpoints
 - `POST /api/endpoints/:id/activate`: troca o endpoint ativo
 - `GET /api/health`: mostra o endpoint ativo
+- `GET /api/catalog`: retorna o catálogo central e metadados
+- `PUT /api/catalog`: persiste o estado atual do catálogo salvo pela UI
+- `POST /api/catalog/import`: recebe catálogo enviado pelo ComfyUI/Modal e faz merge/upsert por `entry_id`
 - `POST /api/modal-registry/report`: recebe eventos do Modal e salva o ultimo estado por endpoint
 - `ALL /modal/*`: encaminha para o endpoint ativo
 - `GET /dashboard/`: abre o dashboard administrativo
 - `ALL /cmfy_XX/*`: proxy reverso da UI do ComfyUI para cada endpoint configurado
+
+## Auth
+
+Neste momento o projeto está preparado para funcionar sem autenticação.
+
+- `ENABLE_DASHBOARD_AUTH=true` ativa a proteção das rotas administrativas por `DASHBOARD_ADMIN_TOKEN`
+- `ENABLE_REGISTRY_AUTH=true` ativa a proteção do registry por `MODAL_REGISTRY_TOKEN`
+
+Se essas flags não forem definidas, o dashboard e a importação de catálogo funcionam sem token.
 
 ## Observação importante
 

@@ -1,5 +1,3 @@
-const STORAGE_KEY = "projectmdl-admin-token";
-
 const state = {
   config: {
     endpoints: [],
@@ -12,17 +10,40 @@ const state = {
   endpointStatusesById: {},
   lastStatusProbeAtUtc: null,
   refreshingEndpointIds: {},
+  catalog: {
+    entries: [],
+    totalEntries: 0,
+    lastUpdated: null,
+    recentSyncs: [],
+    recentEndpoints: [],
+  },
+  catalogFilters: {
+    query: "",
+    provider: "",
+    category: "",
+  },
+  catalogDirty: false,
+  catalogDirtyEntryIds: {},
+  catalogSaving: false,
 };
 
 const elements = {
-  adminToken: document.getElementById("admin-token"),
-  saveTokenButton: document.getElementById("save-token-button"),
-  clearTokenButton: document.getElementById("clear-token-button"),
   refreshButton: document.getElementById("refresh-button"),
+  refreshCatalogButton: document.getElementById("refresh-catalog-button"),
+  saveCatalogButton: document.getElementById("save-catalog-button"),
   statusBox: document.getElementById("status-box"),
   proxyBase: document.getElementById("proxy-base"),
   activeEndpointName: document.getElementById("active-endpoint-name"),
   endpointCounter: document.getElementById("endpoint-counter"),
+  catalogEntryCount: document.getElementById("catalog-entry-count"),
+  catalogLastSync: document.getElementById("catalog-last-sync"),
+  catalogLastSource: document.getElementById("catalog-last-source"),
+  catalogCounter: document.getElementById("catalog-counter"),
+  catalogSyncSummary: document.getElementById("catalog-sync-summary"),
+  catalogSearch: document.getElementById("catalog-search"),
+  catalogProviderFilter: document.getElementById("catalog-provider-filter"),
+  catalogCategoryFilter: document.getElementById("catalog-category-filter"),
+  catalogTableBody: document.getElementById("catalog-table-body"),
   endpointList: document.getElementById("endpoint-list"),
   endpointTemplate: document.getElementById("endpoint-row-template"),
   endpointForm: document.getElementById("endpoint-form"),
@@ -38,25 +59,21 @@ const elements = {
 boot();
 
 function boot() {
-  elements.adminToken.value = localStorage.getItem(STORAGE_KEY) || "";
   bindEvents();
   refreshConfig({ showStatus: false });
 }
 
 function bindEvents() {
-  elements.saveTokenButton.addEventListener("click", () => {
-    localStorage.setItem(STORAGE_KEY, elements.adminToken.value.trim());
-    setStatus("Token salvo localmente no navegador.");
-  });
-
-  elements.clearTokenButton.addEventListener("click", () => {
-    localStorage.removeItem(STORAGE_KEY);
-    elements.adminToken.value = "";
-    setStatus("Token removido.");
-  });
-
   elements.refreshButton.addEventListener("click", () => {
     refreshConfig({ showStatus: true });
+  });
+
+  elements.refreshCatalogButton.addEventListener("click", () => {
+    refreshCatalog({ showStatus: true });
+  });
+
+  elements.saveCatalogButton.addEventListener("click", () => {
+    saveCatalogEntries();
   });
 
   elements.cancelEditButton.addEventListener("click", resetForm);
@@ -72,23 +89,78 @@ function bindEvents() {
       setStatus(error.message, true);
     }
   });
+
+  elements.catalogSearch.addEventListener("input", (event) => {
+    state.catalogFilters.query = event.currentTarget.value.trim();
+    renderCatalog();
+  });
+
+  elements.catalogProviderFilter.addEventListener("change", (event) => {
+    state.catalogFilters.provider = event.currentTarget.value;
+    renderCatalog();
+  });
+
+  elements.catalogCategoryFilter.addEventListener("change", (event) => {
+    state.catalogFilters.category = event.currentTarget.value;
+    renderCatalog();
+  });
 }
 
 async function refreshConfig(options = {}) {
+  if (!options.force && !confirmCatalogRefreshLoss()) {
+    return;
+  }
   try {
-    state.config = await api("/api/config");
-    const statusError = await refreshEndpointStatuses();
+    const [config, catalog, statusError] = await Promise.all([
+      api("/api/config"),
+      api("/api/catalog"),
+      refreshEndpointStatuses(),
+    ]);
+    state.config = config;
+    state.catalog = catalog;
+    state.catalogDirty = false;
+    state.catalogDirtyEntryIds = {};
     render();
     if (options.showStatus) {
       if (statusError) {
-        setStatus(`Configuracao atualizada, mas o status ao vivo falhou: ${statusError.message}`, true);
+        setStatus(
+          `Configuracao e catalogo atualizados, mas o status ao vivo falhou: ${statusError.message}`,
+          true
+        );
       } else {
-        setStatus("Configuracao e status atualizados.");
+        setStatus("Configuracao, catalogo e status atualizados.");
       }
     }
   } catch (error) {
     setStatus(error.message, true);
   }
+}
+
+async function refreshCatalog(options = {}) {
+  if (!options.force && !confirmCatalogRefreshLoss()) {
+    return;
+  }
+  try {
+    state.catalog = await api("/api/catalog");
+    state.catalogDirty = false;
+    state.catalogDirtyEntryIds = {};
+    renderCatalog();
+    renderOverview();
+    if (options.showStatus) {
+      setStatus("Catalogo atualizado.");
+    }
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+}
+
+function confirmCatalogRefreshLoss() {
+  if (!state.catalogDirty) {
+    return true;
+  }
+  return confirm(
+    "Existem alteracoes nao salvas no catalogo. Atualizar agora vai descartar esse estado local. Continuar?"
+  );
 }
 
 async function refreshEndpointStatuses() {
@@ -108,7 +180,237 @@ function render() {
   elements.proxyBase.textContent = `${location.origin}/modal`;
   elements.activeEndpointName.textContent = active ? active.name : "nenhum";
   elements.endpointCounter.textContent = buildEndpointCounterText(displayEndpoints);
+  renderOverview();
   renderEndpointList(displayEndpoints);
+  renderCatalog();
+}
+
+function renderOverview() {
+  const totalEntries = Number(state.catalog.totalEntries || state.catalog.entries.length || 0);
+  const lastSync = state.catalog.lastUpdated || null;
+  const lastSource = state.catalog.recentSyncs?.[0] || null;
+
+  elements.catalogEntryCount.textContent = String(totalEntries);
+  elements.catalogLastSync.textContent = lastSync ? formatTimestamp(lastSync) : "nenhuma";
+  elements.catalogLastSource.textContent =
+    lastSource?.endpointLabel ||
+    lastSource?.endpointId ||
+    lastSource?.app ||
+    lastSource?.source ||
+    "nenhum";
+  elements.saveCatalogButton.disabled = state.catalogSaving;
+  elements.saveCatalogButton.textContent = state.catalogSaving
+    ? "Salvando..."
+    : state.catalogDirty
+      ? "Salvar Catalogo*"
+      : "Salvar Catalogo";
+}
+
+function renderCatalog() {
+  const entries = getFilteredCatalogEntries();
+  const totalEntries = Number(state.catalog.totalEntries || state.catalog.entries.length || 0);
+  elements.catalogCounter.textContent = `${entries.length} visiveis | ${totalEntries} no total`;
+  elements.catalogSyncSummary.textContent = buildCatalogSyncSummary();
+  renderCatalogFilterOptions();
+  renderCatalogTable(entries);
+}
+
+function renderCatalogFilterOptions() {
+  const providerValues = collectUniqueCatalogValues(state.catalog.entries, "provider");
+  const categoryValues = collectUniqueCatalogValues(state.catalog.entries, "category");
+  replaceSelectOptions(elements.catalogProviderFilter, "Todos", providerValues, state.catalogFilters.provider);
+  replaceSelectOptions(elements.catalogCategoryFilter, "Todas", categoryValues, state.catalogFilters.category);
+}
+
+function renderCatalogTable(entries) {
+  elements.catalogTableBody.innerHTML = "";
+  if (!entries.length) {
+    const emptyRow = document.createElement("tr");
+    const cell = document.createElement("td");
+    cell.colSpan = 7;
+    cell.className = "catalog-empty";
+    cell.textContent = "Nenhuma entrada encontrada para os filtros atuais.";
+    emptyRow.append(cell);
+    elements.catalogTableBody.append(emptyRow);
+    return;
+  }
+
+  for (const entry of entries) {
+    const row = document.createElement("tr");
+    row.dataset.entryId = entry.entryId;
+    if (state.catalogDirtyEntryIds[entry.entryId]) {
+      row.classList.add("catalog-row-dirty");
+    }
+
+    row.append(
+      buildCatalogEditableCell(entry, "filename", "text", "Nome do arquivo"),
+      buildCatalogEditableCell(entry, "provider", "text", "Provider"),
+      buildCatalogEditableCell(entry, "category", "text", "Categoria"),
+      buildCatalogEditableCell(entry, "subdir", "text", "Subpasta"),
+      buildCatalogLinkCell(entry),
+      buildCatalogSourceCell(entry),
+      buildCatalogUpdatedCell(entry)
+    );
+
+    elements.catalogTableBody.append(row);
+  }
+}
+
+function buildCatalogEditableCell(entry, field, type, label) {
+  const cell = document.createElement("td");
+  const input = document.createElement("input");
+  input.type = type;
+  input.className = "catalog-input";
+  input.value = entry[field] || "";
+  input.placeholder = label;
+  input.addEventListener("input", (event) => {
+    updateCatalogEntryField(entry.entryId, field, event.currentTarget.value);
+  });
+  cell.append(input);
+  return cell;
+}
+
+function buildCatalogLinkCell(entry) {
+  const cell = document.createElement("td");
+  const wrapper = document.createElement("div");
+  wrapper.className = "catalog-link-cell";
+
+  const input = document.createElement("input");
+  input.type = "url";
+  input.className = "catalog-input";
+  input.value = entry.url || "";
+  input.placeholder = "https://...";
+  input.addEventListener("input", (event) => {
+    const nextValue = event.currentTarget.value;
+    updateCatalogEntryField(entry.entryId, "url", nextValue);
+    if (nextValue) {
+      anchor.href = nextValue;
+      anchor.hidden = false;
+    } else {
+      anchor.hidden = true;
+      anchor.removeAttribute("href");
+    }
+  });
+
+  const anchor = document.createElement("a");
+  anchor.className = "endpoint-link";
+  anchor.target = "_blank";
+  anchor.rel = "noreferrer";
+  anchor.textContent = "Abrir";
+  if (entry.url) {
+    anchor.href = entry.url;
+  } else {
+    anchor.hidden = true;
+  }
+
+  wrapper.append(input, anchor);
+  cell.append(wrapper);
+  return cell;
+}
+
+function buildCatalogSourceCell(entry) {
+  const cell = document.createElement("td");
+  const primary = entry.sourceEndpointLabel || entry.sourceEndpointId || entry.source || "manual";
+  const secondary = entry.app ? `app: ${entry.app}` : "";
+  cell.className = "catalog-meta-cell";
+  cell.textContent = secondary ? `${primary} | ${secondary}` : primary;
+  return cell;
+}
+
+function buildCatalogUpdatedCell(entry) {
+  const cell = document.createElement("td");
+  const updatedAt = entry.updatedAtUtc || entry.timestampUtc;
+  cell.className = "catalog-meta-cell";
+  cell.textContent = updatedAt ? formatTimestamp(updatedAt) : "sem data";
+  return cell;
+}
+
+function updateCatalogEntryField(entryId, field, value) {
+  const target = state.catalog.entries.find((entry) => entry.entryId === entryId);
+  if (!target) {
+    return;
+  }
+  target[field] = value;
+  target.updatedAtUtc = new Date().toISOString();
+  state.catalogDirty = true;
+  state.catalogDirtyEntryIds[entryId] = true;
+  document
+    .querySelector(`tr[data-entry-id="${entryId}"]`)
+    ?.classList.add("catalog-row-dirty");
+  renderOverview();
+}
+
+function getFilteredCatalogEntries() {
+  const query = state.catalogFilters.query.trim().toLowerCase();
+  const providerFilter = state.catalogFilters.provider;
+  const categoryFilter = state.catalogFilters.category;
+
+  return [...(state.catalog.entries || [])].filter((entry) => {
+    if (providerFilter && entry.provider !== providerFilter) {
+      return false;
+    }
+    if (categoryFilter && entry.category !== categoryFilter) {
+      return false;
+    }
+    if (!query) {
+      return true;
+    }
+    const haystack = [
+      entry.filename,
+      entry.url,
+      entry.provider,
+      entry.category,
+      entry.subdir,
+      entry.sourceEndpointLabel,
+      entry.sourceEndpointId,
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+    return haystack.includes(query);
+  });
+}
+
+function collectUniqueCatalogValues(entries, field) {
+  return [...new Set(entries.map((entry) => entry[field]).filter(Boolean))].sort((left, right) =>
+    compareText(left, right)
+  );
+}
+
+function replaceSelectOptions(select, allLabel, values, selectedValue) {
+  select.innerHTML = "";
+  const defaultOption = document.createElement("option");
+  defaultOption.value = "";
+  defaultOption.textContent = allLabel;
+  select.append(defaultOption);
+
+  for (const value of values) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = value;
+    select.append(option);
+  }
+
+  select.value = values.includes(selectedValue) ? selectedValue : "";
+}
+
+function buildCatalogSyncSummary() {
+  const lastSync = state.catalog.recentSyncs?.[0] || null;
+  if (!lastSync) {
+    return "Nenhuma sincronizacao recebida ainda.";
+  }
+  const parts = [];
+  parts.push(`ultima sync: ${formatTimestamp(lastSync.syncedAtUtc || lastSync.updatedAtUtc)}`);
+  if (lastSync.endpointLabel || lastSync.endpointId) {
+    parts.push(`endpoint: ${lastSync.endpointLabel || lastSync.endpointId}`);
+  }
+  if (lastSync.reason) {
+    parts.push(`motivo: ${lastSync.reason}`);
+  }
+  if (lastSync.upserted) {
+    parts.push(`upserts: ${lastSync.upserted}`);
+  }
+  return parts.join(" | ");
 }
 
 function renderEndpointList(displayEndpoints) {
@@ -512,6 +814,34 @@ async function removeEndpoint(endpointId) {
   }
 }
 
+async function saveCatalogEntries() {
+  if (state.catalogSaving) {
+    return;
+  }
+  try {
+    state.catalogSaving = true;
+    renderOverview();
+    const payload = await api("/api/catalog", {
+      method: "PUT",
+      body: {
+        entries: state.catalog.entries,
+        updatedAtUtc: new Date().toISOString(),
+      },
+    });
+    state.catalogDirty = false;
+    state.catalogDirtyEntryIds = {};
+    state.catalog = await api("/api/catalog");
+    renderOverview();
+    renderCatalog();
+    setStatus(`Catalogo salvo com sucesso. ${payload.upserted || 0} entradas persistidas.`);
+  } catch (error) {
+    setStatus(error.message, true);
+  } finally {
+    state.catalogSaving = false;
+    renderOverview();
+  }
+}
+
 async function saveConfig(nextConfig) {
   const payload = await api("/api/config", {
     method: "PUT",
@@ -524,10 +854,6 @@ async function saveConfig(nextConfig) {
 
 async function api(path, options = {}) {
   const headers = new Headers(options.headers || {});
-  const token = elements.adminToken.value.trim();
-  if (token) {
-    headers.set("x-admin-token", token);
-  }
 
   let body = options.body;
   if (body && typeof body !== "string") {

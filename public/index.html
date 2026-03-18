@@ -30,22 +30,27 @@
       <section class="grid">
         <article class="panel">
           <div class="panel-head">
-            <h2>Painel</h2>
+            <h2>Resumo central</h2>
             <button id="refresh-button" class="ghost-button" type="button">Atualizar</button>
           </div>
 
-          <label class="field">
-            <span>Token admin</span>
-            <input id="admin-token" type="password" placeholder="Opcional, se voce configurou secret" />
-          </label>
-
-          <div class="actions">
-            <button id="save-token-button" type="button">Salvar token local</button>
-            <button id="clear-token-button" class="ghost-button" type="button">Limpar token</button>
+          <div class="overview-grid">
+            <div class="overview-card">
+              <span class="hero-label">Entradas no catalogo</span>
+              <strong id="catalog-entry-count">0</strong>
+            </div>
+            <div class="overview-card">
+              <span class="hero-label">Ultima sincronizacao</span>
+              <strong id="catalog-last-sync">nenhuma</strong>
+            </div>
+            <div class="overview-card">
+              <span class="hero-label">Ultimo endpoint que sincronizou</span>
+              <strong id="catalog-last-source">nenhum</strong>
+            </div>
           </div>
 
           <div class="status-box" id="status-box">
-            Pronto para configurar endpoints.
+            Pronto para gerenciar endpoints e catalogo central.
           </div>
         </article>
 
@@ -97,6 +102,61 @@
           <span id="endpoint-counter">0 configurados</span>
         </div>
         <div id="endpoint-list" class="endpoint-list"></div>
+      </section>
+
+      <section class="panel catalog-panel">
+        <div class="panel-head">
+          <div>
+            <h2>Catalogo</h2>
+            <p class="panel-subtitle" id="catalog-counter">0 entradas</p>
+          </div>
+          <div class="actions">
+            <button id="refresh-catalog-button" class="ghost-button" type="button">Atualizar catalogo</button>
+            <button id="save-catalog-button" type="button">Salvar Catalogo</button>
+          </div>
+        </div>
+
+        <div class="catalog-toolbar">
+          <label class="field compact-field">
+            <span>Busca</span>
+            <input id="catalog-search" type="search" placeholder="Buscar por nome, url ou endpoint" />
+          </label>
+
+          <label class="field compact-field">
+            <span>Provider</span>
+            <select id="catalog-provider-filter">
+              <option value="">Todos</option>
+            </select>
+          </label>
+
+          <label class="field compact-field">
+            <span>Categoria</span>
+            <select id="catalog-category-filter">
+              <option value="">Todas</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="catalog-sync-summary" id="catalog-sync-summary">
+          Nenhuma sincronizacao recebida ainda.
+        </div>
+
+        <div class="catalog-table-wrap">
+          <table class="catalog-table">
+            <thead>
+              <tr>
+                <th>Arquivo</th>
+                <th>Provider</th>
+                <th>Categoria</th>
+                <th>Subpasta</th>
+                <th>Link</th>
+                <th>Endpoint origem</th>
+                <th>Ultima atualizacao</th>
+              </tr>
+            </thead>
+            <tbody id="catalog-table-body"></tbody>
+          </table>
+        </div>
       </section>
     </main>
 
