@@ -1827,7 +1827,16 @@ async function buildEndpointProxyResponse(context) {
 
   rewriteProxyLocationHeader(responseHeaders, context);
 
-  if (!context.aliasBasePath || context.upstreamResponse.status === 101) {
+  if (context.upstreamResponse.status === 101) {
+    return new Response(null, {
+      status: context.upstreamResponse.status,
+      statusText: context.upstreamResponse.statusText,
+      headers: responseHeaders,
+      webSocket: context.upstreamResponse.webSocket,
+    });
+  }
+
+  if (!context.aliasBasePath) {
     return new Response(context.upstreamResponse.body, {
       status: context.upstreamResponse.status,
       statusText: context.upstreamResponse.statusText,
