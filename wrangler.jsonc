@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "projectmdl-router",
+  "name": "projectmdl",
   "main": "src/worker.js",
   "compatibility_date": "2026-03-17",
   "assets": {
