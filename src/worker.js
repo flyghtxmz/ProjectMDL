@@ -5,6 +5,10 @@ const CATALOG_META_KEY = "catalog:meta";
 const CATALOG_SNAPSHOT_KEY = "catalog:snapshot";
 const CATALOG_MERGE_PRESERVE_EXISTING = "preserve_existing";
 const CATALOG_MERGE_PREFER_INCOMING = "prefer_incoming";
+const DEFAULT_GITHUB_OWNER = "flyghtxmz";
+const DEFAULT_GITHUB_REPO = "comfyui-catalog";
+const DEFAULT_GITHUB_BRANCH = "main";
+const DEFAULT_GITHUB_CATALOG_PATH = "catalog.json";
 const DEFAULT_STATUS_PATHS = ["/comfyui/status", "/comfyui-modal/status"];
 const DEFAULT_ACTIVE_CATALOG_PATHS = [
   "/comfyui/catalog",
@@ -84,8 +88,9 @@ export default {
         logApiRequest(request, url, response);
         return response;
       }
+      const { entries, meta } = await loadCatalog(env);
       const response = withCors(
-        jsonResponse(await buildCatalogPayload(env), {
+        jsonResponse(buildCatalogSnapshotData(entries, meta), {
           headers: {
             "cache-control": "no-store",
           },
@@ -463,6 +468,16 @@ async function buildCatalogPayload(env) {
   };
 }
 
+function buildCatalogSnapshotData(entries, meta) {
+  return {
+    ok: true,
+    entries,
+    totalEntries: entries.length,
+    lastUpdated: meta?.lastUpdated || collectCatalogLastUpdated(entries) || new Date().toISOString(),
+    recentSyncs: meta?.recentSyncs || [],
+  };
+}
+
 async function handleCatalogImport(request, env) {
   let payload;
   try {
@@ -498,6 +513,7 @@ async function importCatalogPayload(env, normalized, options = {}) {
     ok: true,
     received: normalized.entries.length,
     upserted: result.upserted,
+    github: result.github,
   };
 }
 
@@ -547,6 +563,7 @@ async function handleCatalogSave(request, env) {
     ok: true,
     received: normalizedEntries.length,
     upserted: result.upserted,
+    github: result.github,
   });
 }
 
@@ -637,6 +654,7 @@ async function handleActiveCatalogSave(env) {
     sourceUrl: selectedUrl,
     endpointId: normalized.endpointId,
     endpointLabel: normalized.endpointLabel,
+    github: result.github,
   });
 }
 
@@ -790,10 +808,15 @@ async function upsertCatalogEntries(env, entries, syncContext) {
       .slice(0, MAX_RECENT_CATALOG_SYNCS),
   };
   await saveCatalogMeta(env, nextMeta);
+  const github = await publishCatalogSnapshotToGitHub(
+    env,
+    buildCatalogSnapshotData(snapshotEntries, nextMeta)
+  );
 
   return {
     upserted: normalizedEntries.length,
     entries: upsertedEntries,
+    github,
   };
 }
 
@@ -804,6 +827,106 @@ async function countCatalogEntries(env) {
   }
   const keys = await listCatalogEntryKeys(env);
   return keys.length;
+}
+
+function getGitHubCatalogConfig(env) {
+  return {
+    token: String(env?.GITHUB_TOKEN || "").trim(),
+    owner: String(env?.GITHUB_OWNER || DEFAULT_GITHUB_OWNER).trim(),
+    repo: String(env?.GITHUB_REPO || DEFAULT_GITHUB_REPO).trim(),
+    branch: String(env?.GITHUB_BRANCH || DEFAULT_GITHUB_BRANCH).trim(),
+    path: String(env?.GITHUB_CATALOG_PATH || DEFAULT_GITHUB_CATALOG_PATH).trim(),
+  };
+}
+
+async function publishCatalogSnapshotToGitHub(env, snapshotData) {
+  const config = getGitHubCatalogConfig(env);
+  console.log(`[projectmdl] Publishing catalog snapshot to GitHub`);
+
+  if (!config.token) {
+    const error = "GITHUB_TOKEN not configured";
+    console.log(`[projectmdl] GitHub catalog snapshot update failed: ${error}`);
+    return { ok: false, skipped: true, error };
+  }
+
+  const encodedPath = config.path
+    .split("/")
+    .map((part) => encodeURIComponent(part))
+    .join("/");
+  const getUrl = `https://api.github.com/repos/${encodeURIComponent(config.owner)}/${encodeURIComponent(config.repo)}/contents/${encodedPath}?ref=${encodeURIComponent(config.branch)}`;
+  const putUrl = `https://api.github.com/repos/${encodeURIComponent(config.owner)}/${encodeURIComponent(config.repo)}/contents/${encodedPath}`;
+  const headers = {
+    accept: "application/vnd.github+json",
+    authorization: `Bearer ${config.token}`,
+    "content-type": "application/json; charset=utf-8",
+    "user-agent": "projectmdl-worker",
+    "x-github-api-version": "2022-11-28",
+  };
+
+  let sha = null;
+  const getResponse = await fetch(getUrl, {
+    method: "GET",
+    headers,
+  });
+  if (getResponse.status === 200) {
+    const payload = await getResponse.json();
+    sha = typeof payload?.sha === "string" ? payload.sha : null;
+  } else if (getResponse.status !== 404) {
+    const error = `GET contents failed (${getResponse.status}): ${await readGitHubErrorBody(getResponse)}`;
+    console.log(`[projectmdl] GitHub catalog snapshot update failed: ${error}`);
+    return { ok: false, error };
+  }
+
+  const putBody = {
+    message: `Update catalog snapshot ${snapshotData.lastUpdated || new Date().toISOString()}`,
+    content: encodeBase64Utf8(JSON.stringify(snapshotData, null, 2)),
+    branch: config.branch,
+  };
+  if (sha) {
+    putBody.sha = sha;
+  }
+
+  const putResponse = await fetch(putUrl, {
+    method: "PUT",
+    headers,
+    body: JSON.stringify(putBody),
+  });
+  if (!putResponse.ok) {
+    const error = `PUT contents failed (${putResponse.status}): ${await readGitHubErrorBody(putResponse)}`;
+    console.log(`[projectmdl] GitHub catalog snapshot update failed: ${error}`);
+    return { ok: false, error };
+  }
+
+  const payload = await putResponse.json();
+  console.log(`[projectmdl] GitHub catalog snapshot updated successfully`);
+  return {
+    ok: true,
+    sha: payload?.content?.sha || payload?.commit?.sha || null,
+    downloadUrl: payload?.content?.download_url || null,
+    htmlUrl: payload?.content?.html_url || null,
+  };
+}
+
+async function readGitHubErrorBody(response) {
+  const contentType = response.headers.get("content-type") || "";
+  try {
+    if (contentType.includes("application/json")) {
+      const payload = await response.json();
+      return payload?.message || JSON.stringify(payload);
+    }
+    return (await response.text()).slice(0, 500);
+  } catch {
+    return `HTTP ${response.status}`;
+  }
+}
+
+function encodeBase64Utf8(value) {
+  const bytes = new TextEncoder().encode(String(value || ""));
+  let binary = "";
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  return btoa(binary);
 }
 
 function normalizeCatalogImportPayload(payload) {
@@ -1879,18 +2002,28 @@ function buildProxyBootstrap(aliasBasePath) {
     `const base=${aliasPathLiteral};`,
     "const root=base+'/';",
     "const origin=location.origin;",
+    "const host=location.host;",
+    "const prefixAbsolute=function(abs,preferRelative){",
+    "if(abs.pathname===base||abs.pathname.startsWith(root))return preferRelative?abs.pathname+abs.search+abs.hash:abs.toString();",
+    "abs.pathname=abs.pathname==='/'?root:base+abs.pathname;",
+    "return preferRelative?abs.pathname+abs.search+abs.hash:abs.toString();",
+    "};",
     "const prefix=function(value){",
     "if(value===undefined||value===null)return value;",
     "const raw=String(value);",
     "if(!raw||raw.startsWith('#')||raw.startsWith('data:')||raw.startsWith('blob:')||raw.startsWith('javascript:')||raw.startsWith('mailto:'))return value;",
     "if(raw===base||raw.startsWith(root)||raw.startsWith(base+'?'))return raw;",
-    "if(raw.startsWith('//'))return raw;",
     "try{",
     "const abs=new URL(raw,location.href);",
-    "if(abs.origin!==origin)return raw;",
-    "if(abs.pathname===base||abs.pathname.startsWith(root))return raw;",
-    "abs.pathname=abs.pathname==='/'?root:base+abs.pathname;",
-    "return raw.startsWith('/')?abs.pathname+abs.search+abs.hash:abs.toString();",
+    "const sameOrigin=abs.origin===origin;",
+    "const sameHost=abs.host===host;",
+    "const isSameHostWs=(abs.protocol==='ws:'||abs.protocol==='wss:')&&sameHost;",
+    "if(!sameOrigin&&!isSameHostWs)return raw;",
+    "if(raw.startsWith('//')){",
+    "const rendered=prefixAbsolute(abs,false);",
+    "return rendered.startsWith(abs.protocol)?rendered.replace(/^[a-z]+:/i,''):rendered;",
+    "}",
+    "return prefixAbsolute(abs,raw.startsWith('/'));",
     "}catch(_error){return raw;}",
     "};",
     "const prefixSrcset=function(value){",

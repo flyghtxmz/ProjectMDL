@@ -77,6 +77,20 @@ npm run deploy
 - `POST /api/catalog/save-active`: consulta o catálogo do endpoint ativo e o persiste no catálogo central
 - `POST /api/catalog/import`: recebe catálogo enviado pelo ComfyUI/Modal e faz merge/upsert por `entry_id`
 
+Sempre que o catálogo central é atualizado, o Worker também tenta publicar o snapshot no GitHub via Contents API.
+
+Configuração:
+
+- `GITHUB_TOKEN`
+- `GITHUB_OWNER` (default: `flyghtxmz`)
+- `GITHUB_REPO` (default: `comfyui-catalog`)
+- `GITHUB_BRANCH` (default: `main`)
+- `GITHUB_CATALOG_PATH` (default: `catalog.json`)
+
+Com isso, o raw público pode ser usado pelo ComfyUI em:
+
+- `https://raw.githubusercontent.com/flyghtxmz/comfyui-catalog/main/catalog.json`
+
 Por padrao, as importacoes do catalogo sao conservadoras:
 
 - `entry_id` novo: adiciona a entrada

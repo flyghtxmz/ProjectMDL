@@ -833,14 +833,12 @@ async function saveCatalogEntries() {
           updatedAtUtc: new Date().toISOString(),
         },
       });
-      setStatus(`Catalogo salvo com sucesso. ${payload.upserted || 0} entradas persistidas.`);
+      setStatus(buildCatalogSaveMessage(payload, "Catalogo salvo com sucesso."));
     } else {
       payload = await api("/api/catalog/save-active", {
         method: "POST",
       });
-      setStatus(
-        `Catalogo sincronizado do endpoint ativo ${payload.endpointLabel || payload.endpointId || ""}. ${payload.upserted || 0} entradas importadas. URL: ${payload.sourceUrl || "nao informada"}.`
-      );
+      setStatus(buildCatalogSaveMessage(payload, `Catalogo sincronizado do endpoint ativo ${payload.endpointLabel || payload.endpointId || ""}. URL: ${payload.sourceUrl || "nao informada"}.`));
     }
     state.catalogDirty = false;
     state.catalogDirtyEntryIds = {};
@@ -853,6 +851,16 @@ async function saveCatalogEntries() {
     state.catalogSaving = false;
     renderOverview();
   }
+}
+
+function buildCatalogSaveMessage(payload, prefix) {
+  const parts = [prefix, `${payload.upserted || 0} entradas persistidas.`];
+  if (payload?.github?.ok) {
+    parts.push("Snapshot publicado no GitHub.");
+  } else if (payload?.github?.error) {
+    parts.push(`Falha ao publicar no GitHub: ${payload.github.error}`);
+  }
+  return parts.join(" ");
 }
 
 async function saveConfig(nextConfig) {
