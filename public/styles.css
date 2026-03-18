@@ -347,6 +347,12 @@ button:disabled {
   font-size: 13px;
 }
 
+.live-status-summary {
+  color: #d6f6ff;
+  line-height: 1.6;
+  font-size: 13px;
+}
+
 .endpoint-links {
   display: flex;
   flex-wrap: wrap;

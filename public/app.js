@@ -9,6 +9,8 @@ const state = {
     registryByEndpointId: {},
     registryCount: 0,
   },
+  endpointStatusesById: {},
+  lastStatusProbeAtUtc: null,
 };
 
 const elements = {
@@ -73,14 +75,29 @@ function bindEvents() {
 
 async function refreshConfig(options = {}) {
   try {
-    const payload = await api("/api/config");
-    state.config = payload;
+    state.config = await api("/api/config");
+    const statusError = await refreshEndpointStatuses();
     render();
     if (options.showStatus) {
-      setStatus("Configuracao atualizada.");
+      if (statusError) {
+        setStatus(`Configuracao atualizada, mas o status ao vivo falhou: ${statusError.message}`, true);
+      } else {
+        setStatus("Configuracao e status atualizados.");
+      }
     }
   } catch (error) {
     setStatus(error.message, true);
+  }
+}
+
+async function refreshEndpointStatuses() {
+  try {
+    const payload = await api("/api/endpoint-statuses");
+    state.endpointStatusesById = payload.statusesByEndpointId || {};
+    state.lastStatusProbeAtUtc = payload.probedAtUtc || null;
+    return null;
+  } catch (error) {
+    return error;
   }
 }
 
@@ -113,6 +130,7 @@ function renderEndpointList(displayEndpoints) {
     const disabledBadge = fragment.querySelector(".disabled-badge");
     const registryBadge = fragment.querySelector(".registry-badge");
     const unmanagedBadge = fragment.querySelector(".unmanaged-badge");
+    const liveStatusSummary = fragment.querySelector(".live-status-summary");
     const registrySummary = fragment.querySelector(".registry-summary");
     const endpointLinks = fragment.querySelector(".endpoint-links");
     const statusLink = fragment.querySelector(".status-link");
@@ -124,11 +142,17 @@ function renderEndpointList(displayEndpoints) {
     const editButton = fragment.querySelector(".edit-button");
     const deleteButton = fragment.querySelector(".delete-button");
     const registry = endpoint.registry || null;
+    const liveStatus = state.endpointStatusesById[endpoint.id] || null;
     const isConfigured = endpoint.configured !== false;
 
     name.textContent = endpoint.name;
     url.textContent =
-      endpoint.url || registry?.publicBaseUrl || registry?.workflowApiEndpoint || "Sem URL reportada.";
+      endpoint.url ||
+      liveStatus?.publicBaseUrl ||
+      registry?.publicBaseUrl ||
+      liveStatus?.workflowApiEndpoint ||
+      registry?.workflowApiEndpoint ||
+      "Sem URL reportada.";
     notes.textContent = buildEndpointNotes(endpoint);
     activeBadge.hidden = !isConfigured || state.config.activeEndpoint?.id !== endpoint.id;
     disabledBadge.hidden = !isConfigured || endpoint.enabled !== false;
@@ -141,15 +165,22 @@ function renderEndpointList(displayEndpoints) {
     editButton.hidden = !isConfigured;
     deleteButton.hidden = !isConfigured;
 
+    const liveSummaryText = buildLiveStatusSummary(liveStatus);
+    liveStatusSummary.hidden = !liveSummaryText;
+    liveStatusSummary.textContent = liveSummaryText;
+
     const summaryText = buildRegistrySummary(registry, endpoint.id);
     registrySummary.hidden = !summaryText;
     registrySummary.textContent = summaryText;
 
     const hasLinks = [
-      applyOptionalLink(statusLink, registry?.statusEndpoint),
-      applyOptionalLink(workflowLink, registry?.workflowApiEndpoint),
-      applyOptionalLink(promptLink, registry?.promptStatusEndpoint),
-      applyOptionalLink(publicLink, registry?.publicBaseUrl),
+      applyOptionalLink(statusLink, liveStatus?.statusEndpoint || registry?.statusEndpoint),
+      applyOptionalLink(
+        workflowLink,
+        liveStatus?.workflowApiEndpoint || registry?.workflowApiEndpoint
+      ),
+      applyOptionalLink(promptLink, liveStatus?.promptStatusEndpoint || registry?.promptStatusEndpoint),
+      applyOptionalLink(publicLink, liveStatus?.publicBaseUrl || registry?.publicBaseUrl || endpoint.url),
     ].some(Boolean);
     endpointLinks.hidden = !hasLinks;
 
@@ -194,12 +225,21 @@ function buildEndpointCounterText(displayEndpoints) {
   const configuredCount = state.config.endpoints.length;
   const registryCount = Number(state.config.registryCount || 0);
   const discoveredCount = displayEndpoints.filter((endpoint) => endpoint.configured === false).length;
+  const onlineCount = Object.values(state.endpointStatusesById).filter(
+    (status) => status.reachable && status.ok
+  ).length;
   const parts = [`${configuredCount} configurados`];
   if (registryCount) {
     parts.push(`${registryCount} registrados`);
   }
   if (discoveredCount) {
     parts.push(`${discoveredCount} auto-descobertos`);
+  }
+  if (onlineCount) {
+    parts.push(`${onlineCount} online`);
+  }
+  if (state.lastStatusProbeAtUtc) {
+    parts.push(`status ${formatTimestamp(state.lastStatusProbeAtUtc)}`);
   }
   return parts.join(" | ");
 }
@@ -244,6 +284,47 @@ function buildRegistrySummary(registry, fallbackEndpointId) {
   return parts.join(" | ");
 }
 
+function buildLiveStatusSummary(liveStatus) {
+  if (!liveStatus) {
+    return "";
+  }
+  const parts = [];
+  if (!liveStatus.reachable) {
+    parts.push(`status: indisponivel`);
+    if (liveStatus.error) {
+      parts.push(`erro: ${liveStatus.error}`);
+    }
+    if (liveStatus.checkedAtUtc) {
+      parts.push(`checado: ${formatTimestamp(liveStatus.checkedAtUtc)}`);
+    }
+    return parts.join(" | ");
+  }
+
+  parts.push(`status: ${liveStatus.ready ? "pronto" : "respondendo"}`);
+  if (liveStatus.serviceState) {
+    parts.push(`servico: ${liveStatus.serviceState}`);
+  }
+  if (liveStatus.modal?.mode) {
+    parts.push(`modo: ${liveStatus.modal.mode}`);
+  }
+  if (typeof liveStatus.modal?.coldStartEligible === "boolean") {
+    parts.push(`cold start: ${liveStatus.modal.coldStartEligible ? "sim" : "nao"}`);
+  }
+  if (liveStatus.gpuType) {
+    parts.push(`gpu: ${liveStatus.gpuType}`);
+  }
+  if (Number.isInteger(liveStatus.modal?.minContainers)) {
+    parts.push(`min containers: ${liveStatus.modal.minContainers}`);
+  }
+  if (typeof liveStatus.uptimeSeconds === "number") {
+    parts.push(`uptime: ${formatDurationSeconds(liveStatus.uptimeSeconds)}`);
+  }
+  if (liveStatus.checkedAtUtc) {
+    parts.push(`checado: ${formatTimestamp(liveStatus.checkedAtUtc)}`);
+  }
+  return parts.join(" | ");
+}
+
 function applyOptionalLink(anchor, url) {
   if (!url) {
     anchor.hidden = true;
@@ -276,6 +357,20 @@ function truncateText(value, limit) {
     return text;
   }
   return `${text.slice(0, limit)}...`;
+}
+
+function formatDurationSeconds(value) {
+  const totalSeconds = Math.max(0, Math.round(Number(value) || 0));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours) {
+    return `${hours}h ${minutes}m`;
+  }
+  if (minutes) {
+    return `${minutes}m ${seconds}s`;
+  }
+  return `${seconds}s`;
 }
 
 function buildConfigWithFormChanges() {
@@ -329,7 +424,7 @@ function resetForm() {
 async function activateEndpoint(endpointId) {
   try {
     const payload = await api(`/api/endpoints/${endpointId}/activate`, { method: "POST" });
-    state.config.activeEndpointId = payload.activeEndpoint?.id || null;
+    state.config = payload;
     await refreshConfig();
     setStatus(`Endpoint ativo: ${payload.activeEndpoint?.name || "nenhum"}.`);
   } catch (error) {
@@ -364,6 +459,7 @@ async function saveConfig(nextConfig) {
     body: nextConfig,
   });
   state.config = payload;
+  await refreshEndpointStatuses();
   render();
 }
 

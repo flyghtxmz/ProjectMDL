@@ -1,5 +1,6 @@
 const CONFIG_KEY = "router-config";
 const REGISTRY_KEY_PREFIX = "registry:endpoint:";
+const DEFAULT_STATUS_PATH = "/comfyui-modal/status";
 
 const DEFAULT_CONFIG = {
   endpoints: [],
@@ -37,6 +38,13 @@ export default {
         return withCors(await handleConfigWrite(request, env));
       }
       return withCors(methodNotAllowed(["GET", "PUT"]));
+    }
+
+    if (url.pathname === "/api/endpoint-statuses") {
+      if (request.method !== "GET") {
+        return withCors(methodNotAllowed(["GET"]));
+      }
+      return withCors(jsonResponse(await buildEndpointStatusesPayload(env)));
     }
 
     if (url.pathname === "/api/modal-registry/report") {
@@ -99,6 +107,20 @@ async function buildConfigPayload(env, config = null) {
     activeEndpoint: getActiveEndpoint(resolvedConfig),
     registryByEndpointId,
     registryCount: Object.keys(registryByEndpointId).length,
+  };
+}
+
+async function buildEndpointStatusesPayload(env) {
+  const [config, registryByEndpointId] = await Promise.all([loadConfig(env), loadRegistry(env)]);
+  const probeTargets = buildEndpointProbeTargets(config, registryByEndpointId);
+  const statuses = await Promise.all(probeTargets.map((target) => probeEndpointStatus(target)));
+  const statusesByEndpointId = {};
+  for (const status of statuses) {
+    statusesByEndpointId[status.endpointId] = status;
+  }
+  return {
+    probedAtUtc: new Date().toISOString(),
+    statusesByEndpointId,
   };
 }
 
@@ -405,6 +427,22 @@ function normalizeOptionalUrl(value) {
   return normalizeUrl(raw);
 }
 
+function resolveUrlAgainstBase(value, baseUrl) {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return null;
+  }
+  if (/^https?:\/\//i.test(raw)) {
+    return normalizeUrl(raw);
+  }
+  if (!baseUrl) {
+    return null;
+  }
+  const resolved = new URL(raw, `${normalizeUrl(baseUrl)}/`);
+  resolved.hash = "";
+  return resolved.toString().replace(/\/+$/, "");
+}
+
 function normalizeRegistryPayload(payload) {
   const endpointId = normalizeOptionalText(payload?.endpoint_id);
   if (!endpointId) {
@@ -467,6 +505,143 @@ function normalizeStoredRegistryRecord(raw) {
 
 function registryKey(endpointId) {
   return `${REGISTRY_KEY_PREFIX}${endpointId}`;
+}
+
+function buildEndpointProbeTargets(config, registryByEndpointId) {
+  const targets = [];
+  const seen = new Set();
+
+  for (const endpoint of config.endpoints) {
+    const registry = registryByEndpointId[endpoint.id] || null;
+    const target = buildProbeTarget(endpoint.id, endpoint.name, endpoint.url, registry);
+    if (!target || seen.has(target.endpointId)) {
+      continue;
+    }
+    seen.add(target.endpointId);
+    targets.push(target);
+  }
+
+  for (const registry of Object.values(registryByEndpointId)) {
+    if (seen.has(registry.endpointId)) {
+      continue;
+    }
+    const target = buildProbeTarget(
+      registry.endpointId,
+      registry.endpointLabel || registry.endpointId,
+      registry.publicBaseUrl,
+      registry
+    );
+    if (!target) {
+      continue;
+    }
+    seen.add(target.endpointId);
+    targets.push(target);
+  }
+
+  return targets;
+}
+
+function buildProbeTarget(endpointId, endpointLabel, baseUrl, registry) {
+  const normalizedBaseUrl = normalizeOptionalUrl(baseUrl);
+  const statusUrl =
+    resolveUrlAgainstBase(registry?.statusEndpoint, normalizedBaseUrl) ||
+    resolveUrlAgainstBase(DEFAULT_STATUS_PATH, normalizedBaseUrl);
+  if (!statusUrl) {
+    return null;
+  }
+  return {
+    endpointId,
+    endpointLabel,
+    baseUrl: normalizedBaseUrl,
+    statusUrl,
+  };
+}
+
+async function probeEndpointStatus(target) {
+  try {
+    const response = await fetch(target.statusUrl, {
+      method: "GET",
+      headers: {
+        accept: "application/json, text/plain;q=0.9, */*;q=0.8",
+        "cache-control": "no-store",
+      },
+    });
+    const contentType = response.headers.get("content-type") || "";
+    const payload = contentType.includes("application/json")
+      ? await response.json()
+      : await response.text();
+    if (!response.ok) {
+      return {
+        endpointId: target.endpointId,
+        endpointLabel: target.endpointLabel,
+        baseUrl: target.baseUrl,
+        probeUrl: target.statusUrl,
+        reachable: false,
+        ok: false,
+        httpStatus: response.status,
+        error:
+          typeof payload === "string"
+            ? payload.slice(0, 240)
+            : payload?.error || `HTTP ${response.status}`,
+        checkedAtUtc: new Date().toISOString(),
+      };
+    }
+    return normalizeEndpointStatusPayload(target, payload, response.status);
+  } catch (error) {
+    return {
+      endpointId: target.endpointId,
+      endpointLabel: target.endpointLabel,
+      baseUrl: target.baseUrl,
+      probeUrl: target.statusUrl,
+      reachable: false,
+      ok: false,
+      httpStatus: null,
+      error: error instanceof Error ? error.message : "Falha ao consultar o endpoint.",
+      checkedAtUtc: new Date().toISOString(),
+    };
+  }
+}
+
+function normalizeEndpointStatusPayload(target, payload, httpStatus) {
+  const modal = payload?.modal && typeof payload.modal === "object" ? payload.modal : {};
+  const registry = payload?.registry && typeof payload.registry === "object" ? payload.registry : {};
+  return {
+    endpointId: target.endpointId,
+    endpointLabel: target.endpointLabel,
+    baseUrl: target.baseUrl,
+    probeUrl: target.statusUrl,
+    reachable: true,
+    ok: payload?.ok !== false,
+    ready: payload?.ready === true,
+    httpStatus,
+    serviceState: normalizeOptionalText(payload?.service_state),
+    app: normalizeOptionalText(payload?.app),
+    bootId: normalizeOptionalText(payload?.boot_id),
+    startedAtUtc: normalizeOptionalTimestamp(payload?.started_at_utc),
+    uptimeSeconds:
+      typeof payload?.uptime_seconds === "number" ? Number(payload.uptime_seconds) : null,
+    gpuType: normalizeOptionalText(payload?.gpu_type),
+    statusEndpoint: resolveUrlAgainstBase(payload?.status_endpoint, target.baseUrl) || target.statusUrl,
+    workflowApiEndpoint: resolveUrlAgainstBase(payload?.workflow_api_endpoint, target.baseUrl),
+    promptStatusEndpoint: resolveUrlAgainstBase(payload?.prompt_status_endpoint, target.baseUrl),
+    publicBaseUrl: normalizeOptionalUrl(target.baseUrl),
+    modal: {
+      minContainers: normalizeOptionalInteger(modal?.min_containers),
+      scaledownWindowSeconds: normalizeOptionalInteger(modal?.scaledown_window_seconds),
+      coldStartEligible: normalizeOptionalBoolean(modal?.cold_start_eligible),
+      mode: normalizeOptionalText(modal?.mode),
+    },
+    registry: {
+      enabled: normalizeOptionalBoolean(registry?.enabled),
+      endpointId: normalizeOptionalText(registry?.endpoint_id),
+      endpointLabel: normalizeOptionalText(registry?.endpoint_label),
+      heartbeatIntervalSeconds: normalizeOptionalInteger(registry?.heartbeat_interval_seconds),
+      lastSuccessAtUtc: normalizeOptionalTimestamp(registry?.last_success_at_utc),
+      lastError: normalizeOptionalText(registry?.last_error),
+    },
+    checkedAtUtc: new Date().toISOString(),
+    error: null,
+  };
 }
 
 function getActiveEndpoint(config) {
