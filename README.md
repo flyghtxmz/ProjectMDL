@@ -43,13 +43,19 @@ npx wrangler kv namespace create MODAL_ROUTER_KV --preview
 npx wrangler secret put DASHBOARD_ADMIN_TOKEN
 ```
 
-5. Rode localmente:
+5. Defina tambem o token usado pelo Modal para reportar eventos ao registry:
+
+```bash
+npx wrangler secret put MODAL_REGISTRY_TOKEN
+```
+
+6. Rode localmente:
 
 ```bash
 npm run dev
 ```
 
-6. Faça deploy:
+7. Faça deploy:
 
 ```bash
 npm run deploy
@@ -61,6 +67,7 @@ npm run deploy
 - `PUT /api/config`: salva a lista de endpoints
 - `POST /api/endpoints/:id/activate`: troca o endpoint ativo
 - `GET /api/health`: mostra o endpoint ativo
+- `POST /api/modal-registry/report`: recebe eventos do Modal e salva o ultimo estado por endpoint
 - `ALL /modal/*`: encaminha para o endpoint ativo
 
 ## Observação importante

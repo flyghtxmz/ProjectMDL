@@ -1,4 +1,5 @@
 const CONFIG_KEY = "router-config";
+const REGISTRY_KEY_PREFIX = "registry:endpoint:";
 
 const DEFAULT_CONFIG = {
   endpoints: [],
@@ -9,7 +10,7 @@ const DEFAULT_CONFIG = {
 const corsHeaders = {
   "access-control-allow-origin": "*",
   "access-control-allow-methods": "GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS",
-  "access-control-allow-headers": "content-type, authorization, x-admin-token",
+  "access-control-allow-headers": "content-type, authorization, x-admin-token, x-registry-token",
 };
 
 export default {
@@ -36,6 +37,17 @@ export default {
         return withCors(await handleConfigWrite(request, env));
       }
       return withCors(methodNotAllowed(["GET", "PUT"]));
+    }
+
+    if (url.pathname === "/api/modal-registry/report") {
+      if (request.method !== "POST") {
+        return withCors(methodNotAllowed(["POST"]));
+      }
+      const denied = requireRegistryReporter(request, env);
+      if (denied) {
+        return withCors(denied);
+      }
+      return withCors(await handleRegistryReport(request, env));
     }
 
     if (url.pathname.startsWith("/api/endpoints/") && url.pathname.endsWith("/activate")) {
@@ -69,20 +81,24 @@ export default {
 };
 
 async function buildHealthPayload(env) {
-  const config = await loadConfig(env);
+  const [config, registryByEndpointId] = await Promise.all([loadConfig(env), loadRegistry(env)]);
   return {
     ok: true,
     endpointCount: config.endpoints.length,
     activeEndpoint: getActiveEndpoint(config),
     updatedAt: config.updatedAt,
+    registryEndpointCount: Object.keys(registryByEndpointId).length,
   };
 }
 
-async function buildConfigPayload(env) {
-  const config = await loadConfig(env);
+async function buildConfigPayload(env, config = null) {
+  const resolvedConfig = config || (await loadConfig(env));
+  const registryByEndpointId = await loadRegistry(env);
   return {
-    ...config,
-    activeEndpoint: getActiveEndpoint(config),
+    ...resolvedConfig,
+    activeEndpoint: getActiveEndpoint(resolvedConfig),
+    registryByEndpointId,
+    registryCount: Object.keys(registryByEndpointId).length,
   };
 }
 
@@ -121,14 +137,30 @@ function requireAdmin(request, env) {
   if (!configuredSecret) {
     return null;
   }
-  const bearer = request.headers.get("authorization") || "";
-  const bearerToken = bearer.replace(/^Bearer\s+/i, "").trim();
-  const directToken = (request.headers.get("x-admin-token") || "").trim();
-  const candidate = directToken || bearerToken;
+  const candidate = readCandidateToken(request, "x-admin-token");
   if (candidate && timingSafeEqual(candidate, configuredSecret)) {
     return null;
   }
   return new Response("Unauthorized", { status: 401 });
+}
+
+function requireRegistryReporter(request, env) {
+  const configuredSecret = (env.MODAL_REGISTRY_TOKEN || "").trim();
+  if (!configuredSecret) {
+    return new Response("Registry token not configured.", { status: 503 });
+  }
+  const candidate = readCandidateToken(request, "x-registry-token");
+  if (candidate && timingSafeEqual(candidate, configuredSecret)) {
+    return null;
+  }
+  return new Response("Unauthorized", { status: 401 });
+}
+
+function readCandidateToken(request, directHeaderName) {
+  const bearer = request.headers.get("authorization") || "";
+  const bearerToken = bearer.replace(/^Bearer\s+/i, "").trim();
+  const directToken = (request.headers.get(directHeaderName) || "").trim();
+  return directToken || bearerToken;
 }
 
 function timingSafeEqual(left, right) {
@@ -176,6 +208,76 @@ async function saveConfig(env, config) {
   return normalized;
 }
 
+async function loadRegistry(env) {
+  const names = await listRegistryKeys(env);
+  if (!names.length) {
+    return {};
+  }
+  const rawRecords = await Promise.all(
+    names.map((name) => env.MODAL_ROUTER_KV.get(name, "json"))
+  );
+  const registryByEndpointId = {};
+  for (const raw of rawRecords) {
+    const normalized = normalizeStoredRegistryRecord(raw);
+    if (!normalized) {
+      continue;
+    }
+    registryByEndpointId[normalized.endpointId] = normalized;
+  }
+  return registryByEndpointId;
+}
+
+async function listRegistryKeys(env) {
+  const names = [];
+  let cursor = undefined;
+  do {
+    const page = await env.MODAL_ROUTER_KV.list({
+      prefix: REGISTRY_KEY_PREFIX,
+      cursor,
+    });
+    for (const entry of page.keys) {
+      names.push(entry.name);
+    }
+    cursor = page.list_complete ? undefined : page.cursor;
+  } while (cursor);
+  return names;
+}
+
+async function handleRegistryReport(request, env) {
+  let payload;
+  try {
+    payload = await request.json();
+  } catch {
+    return jsonResponse({ error: "JSON invalido." }, { status: 400 });
+  }
+
+  let report;
+  try {
+    report = normalizeRegistryPayload(payload);
+  } catch (error) {
+    return jsonResponse({ error: error.message }, { status: 400 });
+  }
+
+  const key = registryKey(report.endpointId);
+  const previous = normalizeStoredRegistryRecord(await env.MODAL_ROUTER_KV.get(key, "json"));
+  const merged = {
+    ...previous,
+    ...report,
+    firstSeenUtc: previous?.firstSeenUtc || report.lastSeenUtc,
+    reportCount: (previous?.reportCount || 0) + 1,
+  };
+
+  await env.MODAL_ROUTER_KV.put(key, JSON.stringify(merged));
+
+  return jsonResponse({
+    ok: true,
+    endpointId: merged.endpointId,
+    lastSeenUtc: merged.lastSeenUtc,
+    lastEventType: merged.lastEventType,
+    reportCount: merged.reportCount,
+  });
+}
+
 async function handleConfigWrite(request, env) {
   let payload;
   try {
@@ -201,8 +303,7 @@ async function handleConfigWrite(request, env) {
   });
   return jsonResponse({
     ok: true,
-    ...saved,
-    activeEndpoint: getActiveEndpoint(saved),
+    ...(await buildConfigPayload(env, saved)),
   });
 }
 
@@ -226,8 +327,7 @@ async function handleActivateEndpoint(pathname, env) {
   });
   return jsonResponse({
     ok: true,
-    activeEndpoint: getActiveEndpoint(saved),
-    updatedAt: saved.updatedAt,
+    ...(await buildConfigPayload(env, saved)),
   });
 }
 
@@ -257,6 +357,116 @@ function normalizeUrl(value) {
   const url = new URL(raw);
   url.hash = "";
   return url.toString().replace(/\/+$/, "");
+}
+
+function normalizeOptionalText(value) {
+  const text = String(value || "").trim();
+  return text || null;
+}
+
+function normalizeOptionalBoolean(value) {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (value === "true") {
+    return true;
+  }
+  if (value === "false") {
+    return false;
+  }
+  return null;
+}
+
+function normalizeOptionalInteger(value) {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+  const parsed = Number.parseInt(String(value), 10);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizeOptionalTimestamp(value) {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return null;
+  }
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.valueOf())) {
+    return null;
+  }
+  return parsed.toISOString();
+}
+
+function normalizeOptionalUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return null;
+  }
+  return normalizeUrl(raw);
+}
+
+function normalizeRegistryPayload(payload) {
+  const endpointId = normalizeOptionalText(payload?.endpoint_id);
+  if (!endpointId) {
+    throw new Error("O campo endpoint_id e obrigatorio.");
+  }
+  const eventAtUtc = normalizeOptionalTimestamp(payload?.event_at_utc) || new Date().toISOString();
+  const minContainers = normalizeOptionalInteger(payload?.min_containers);
+  const explicitColdStartEligible = normalizeOptionalBoolean(payload?.cold_start_eligible);
+  return {
+    endpointId,
+    endpointLabel: normalizeOptionalText(payload?.endpoint_label) || endpointId,
+    lastEventType: normalizeOptionalText(payload?.event_type) || "unknown",
+    lastSeenUtc: eventAtUtc,
+    receivedAtUtc: new Date().toISOString(),
+    lastBootId: normalizeOptionalText(payload?.boot_id),
+    startedAtUtc: normalizeOptionalTimestamp(payload?.started_at_utc),
+    gpuType: normalizeOptionalText(payload?.gpu_type),
+    minContainers,
+    scaledownWindowSeconds: normalizeOptionalInteger(payload?.scaledown_window_seconds),
+    coldStartEligible:
+      explicitColdStartEligible !== null
+        ? explicitColdStartEligible
+        : minContainers === null
+          ? null
+          : minContainers === 0,
+    mode: normalizeOptionalText(payload?.mode),
+    statusEndpoint: normalizeOptionalUrl(payload?.status_endpoint),
+    workflowApiEndpoint: normalizeOptionalUrl(payload?.workflow_api_endpoint),
+    promptStatusEndpoint: normalizeOptionalUrl(payload?.prompt_status_endpoint),
+    publicBaseUrl: normalizeOptionalUrl(payload?.public_base_url),
+  };
+}
+
+function normalizeStoredRegistryRecord(raw) {
+  const endpointId = normalizeOptionalText(raw?.endpointId);
+  if (!endpointId) {
+    return null;
+  }
+  return {
+    endpointId,
+    endpointLabel: normalizeOptionalText(raw?.endpointLabel) || endpointId,
+    lastEventType: normalizeOptionalText(raw?.lastEventType) || "unknown",
+    lastSeenUtc: normalizeOptionalTimestamp(raw?.lastSeenUtc),
+    receivedAtUtc: normalizeOptionalTimestamp(raw?.receivedAtUtc),
+    lastBootId: normalizeOptionalText(raw?.lastBootId),
+    startedAtUtc: normalizeOptionalTimestamp(raw?.startedAtUtc),
+    gpuType: normalizeOptionalText(raw?.gpuType),
+    minContainers: normalizeOptionalInteger(raw?.minContainers),
+    scaledownWindowSeconds: normalizeOptionalInteger(raw?.scaledownWindowSeconds),
+    coldStartEligible: normalizeOptionalBoolean(raw?.coldStartEligible),
+    mode: normalizeOptionalText(raw?.mode),
+    statusEndpoint: normalizeOptionalUrl(raw?.statusEndpoint),
+    workflowApiEndpoint: normalizeOptionalUrl(raw?.workflowApiEndpoint),
+    promptStatusEndpoint: normalizeOptionalUrl(raw?.promptStatusEndpoint),
+    publicBaseUrl: normalizeOptionalUrl(raw?.publicBaseUrl),
+    firstSeenUtc: normalizeOptionalTimestamp(raw?.firstSeenUtc),
+    reportCount: normalizeOptionalInteger(raw?.reportCount) || 0,
+  };
+}
+
+function registryKey(endpointId) {
+  return `${REGISTRY_KEY_PREFIX}${endpointId}`;
 }
 
 function getActiveEndpoint(config) {

@@ -6,6 +6,8 @@ const state = {
     activeEndpointId: null,
     activeEndpoint: null,
     updatedAt: null,
+    registryByEndpointId: {},
+    registryCount: 0,
   },
 };
 
@@ -84,23 +86,24 @@ async function refreshConfig(options = {}) {
 
 function render() {
   const active = state.config.activeEndpoint;
+  const displayEndpoints = getDisplayEndpoints();
   elements.proxyBase.textContent = `${location.origin}/modal`;
   elements.activeEndpointName.textContent = active ? active.name : "nenhum";
-  elements.endpointCounter.textContent = `${state.config.endpoints.length} configurados`;
-  renderEndpointList();
+  elements.endpointCounter.textContent = buildEndpointCounterText(displayEndpoints);
+  renderEndpointList(displayEndpoints);
 }
 
-function renderEndpointList() {
+function renderEndpointList(displayEndpoints) {
   elements.endpointList.innerHTML = "";
-  if (!state.config.endpoints.length) {
+  if (!displayEndpoints.length) {
     const empty = document.createElement("div");
     empty.className = "status-box";
-    empty.textContent = "Nenhum endpoint cadastrado ainda.";
+    empty.textContent = "Nenhum endpoint configurado ou reportado ainda.";
     elements.endpointList.append(empty);
     return;
   }
 
-  for (const endpoint of state.config.endpoints) {
+  for (const endpoint of displayEndpoints) {
     const fragment = elements.endpointTemplate.content.cloneNode(true);
     const card = fragment.querySelector(".endpoint-card");
     const name = fragment.querySelector(".endpoint-name");
@@ -108,24 +111,171 @@ function renderEndpointList() {
     const notes = fragment.querySelector(".endpoint-notes");
     const activeBadge = fragment.querySelector(".active-badge");
     const disabledBadge = fragment.querySelector(".disabled-badge");
+    const registryBadge = fragment.querySelector(".registry-badge");
+    const unmanagedBadge = fragment.querySelector(".unmanaged-badge");
+    const registrySummary = fragment.querySelector(".registry-summary");
+    const endpointLinks = fragment.querySelector(".endpoint-links");
+    const statusLink = fragment.querySelector(".status-link");
+    const workflowLink = fragment.querySelector(".workflow-link");
+    const promptLink = fragment.querySelector(".prompt-link");
+    const publicLink = fragment.querySelector(".public-link");
+    const actions = fragment.querySelector(".endpoint-actions");
     const activateButton = fragment.querySelector(".activate-button");
     const editButton = fragment.querySelector(".edit-button");
     const deleteButton = fragment.querySelector(".delete-button");
+    const registry = endpoint.registry || null;
+    const isConfigured = endpoint.configured !== false;
 
     name.textContent = endpoint.name;
-    url.textContent = endpoint.url;
-    notes.textContent = endpoint.notes || "Sem notas.";
-    activeBadge.hidden = state.config.activeEndpoint?.id !== endpoint.id;
-    disabledBadge.hidden = endpoint.enabled;
-    activateButton.disabled = !endpoint.enabled || state.config.activeEndpoint?.id === endpoint.id;
+    url.textContent =
+      endpoint.url || registry?.publicBaseUrl || registry?.workflowApiEndpoint || "Sem URL reportada.";
+    notes.textContent = buildEndpointNotes(endpoint);
+    activeBadge.hidden = !isConfigured || state.config.activeEndpoint?.id !== endpoint.id;
+    disabledBadge.hidden = !isConfigured || endpoint.enabled !== false;
+    registryBadge.hidden = !registry;
+    unmanagedBadge.hidden = isConfigured || !registry;
+    activateButton.disabled =
+      !isConfigured || !endpoint.enabled || state.config.activeEndpoint?.id === endpoint.id;
+    actions.hidden = !isConfigured;
+    activateButton.hidden = !isConfigured;
+    editButton.hidden = !isConfigured;
+    deleteButton.hidden = !isConfigured;
 
-    activateButton.addEventListener("click", () => activateEndpoint(endpoint.id));
-    editButton.addEventListener("click", () => populateForm(endpoint));
-    deleteButton.addEventListener("click", () => removeEndpoint(endpoint.id));
+    const summaryText = buildRegistrySummary(registry, endpoint.id);
+    registrySummary.hidden = !summaryText;
+    registrySummary.textContent = summaryText;
+
+    const hasLinks = [
+      applyOptionalLink(statusLink, registry?.statusEndpoint),
+      applyOptionalLink(workflowLink, registry?.workflowApiEndpoint),
+      applyOptionalLink(promptLink, registry?.promptStatusEndpoint),
+      applyOptionalLink(publicLink, registry?.publicBaseUrl),
+    ].some(Boolean);
+    endpointLinks.hidden = !hasLinks;
+
+    if (isConfigured) {
+      activateButton.addEventListener("click", () => activateEndpoint(endpoint.id));
+      editButton.addEventListener("click", () => populateForm(endpoint));
+      deleteButton.addEventListener("click", () => removeEndpoint(endpoint.id));
+    }
 
     card.dataset.endpointId = endpoint.id;
     elements.endpointList.append(fragment);
   }
+}
+
+function getDisplayEndpoints() {
+  const registryByEndpointId = state.config.registryByEndpointId || {};
+  const configuredIds = new Set();
+  const configuredEndpoints = state.config.endpoints.map((endpoint) => {
+    configuredIds.add(endpoint.id);
+    return {
+      ...endpoint,
+      configured: true,
+      registry: registryByEndpointId[endpoint.id] || null,
+    };
+  });
+  const discoveredEndpoints = Object.values(registryByEndpointId)
+    .filter((record) => !configuredIds.has(record.endpointId))
+    .sort((left, right) => compareText(left.endpointLabel || left.endpointId, right.endpointLabel || right.endpointId))
+    .map((record) => ({
+      id: record.endpointId,
+      name: record.endpointLabel || record.endpointId,
+      url: record.publicBaseUrl || record.workflowApiEndpoint || record.statusEndpoint || "",
+      notes: "",
+      enabled: false,
+      configured: false,
+      registry: record,
+    }));
+  return configuredEndpoints.concat(discoveredEndpoints);
+}
+
+function buildEndpointCounterText(displayEndpoints) {
+  const configuredCount = state.config.endpoints.length;
+  const registryCount = Number(state.config.registryCount || 0);
+  const discoveredCount = displayEndpoints.filter((endpoint) => endpoint.configured === false).length;
+  const parts = [`${configuredCount} configurados`];
+  if (registryCount) {
+    parts.push(`${registryCount} registrados`);
+  }
+  if (discoveredCount) {
+    parts.push(`${discoveredCount} auto-descobertos`);
+  }
+  return parts.join(" | ");
+}
+
+function buildEndpointNotes(endpoint) {
+  const parts = [];
+  if (endpoint.notes) {
+    parts.push(endpoint.notes);
+  }
+  if (endpoint.configured === false) {
+    parts.push("Registrado pelo Modal. Cadastre este id no roteador para ativar o proxy.");
+  }
+  return parts.join(" ") || "Sem notas.";
+}
+
+function buildRegistrySummary(registry, fallbackEndpointId) {
+  if (!registry) {
+    return "";
+  }
+  const parts = [`id: ${registry.endpointId || fallbackEndpointId}`];
+  if (registry.lastEventType) {
+    parts.push(`ultimo evento: ${registry.lastEventType}`);
+  }
+  if (registry.lastSeenUtc) {
+    parts.push(`ultimo sinal: ${formatTimestamp(registry.lastSeenUtc)}`);
+  }
+  if (registry.mode) {
+    parts.push(`modo: ${registry.mode}`);
+  }
+  if (typeof registry.coldStartEligible === "boolean") {
+    parts.push(`cold start: ${registry.coldStartEligible ? "elegivel" : "nao"}`);
+  }
+  if (registry.gpuType) {
+    parts.push(`gpu: ${registry.gpuType}`);
+  }
+  if (Number.isInteger(registry.minContainers)) {
+    parts.push(`min containers: ${registry.minContainers}`);
+  }
+  if (registry.lastBootId) {
+    parts.push(`boot: ${truncateText(registry.lastBootId, 16)}`);
+  }
+  return parts.join(" | ");
+}
+
+function applyOptionalLink(anchor, url) {
+  if (!url) {
+    anchor.hidden = true;
+    anchor.removeAttribute("href");
+    return false;
+  }
+  anchor.hidden = false;
+  anchor.href = url;
+  return true;
+}
+
+function compareText(left, right) {
+  return String(left || "").localeCompare(String(right || ""), "pt-BR", { sensitivity: "base" });
+}
+
+function formatTimestamp(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.valueOf())) {
+    return value;
+  }
+  return date.toLocaleString("pt-BR", {
+    dateStyle: "short",
+    timeStyle: "short",
+  });
+}
+
+function truncateText(value, limit) {
+  const text = String(value || "");
+  if (text.length <= limit) {
+    return text;
+  }
+  return `${text.slice(0, limit)}...`;
 }
 
 function buildConfigWithFormChanges() {
