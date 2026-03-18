@@ -78,6 +78,23 @@ export default {
       return response;
     }
 
+    if (url.pathname === "/catalog.json") {
+      if (request.method !== "GET") {
+        const response = withCors(methodNotAllowed(["GET"]));
+        logApiRequest(request, url, response);
+        return response;
+      }
+      const response = withCors(
+        jsonResponse(await buildCatalogPayload(env), {
+          headers: {
+            "cache-control": "no-store",
+          },
+        })
+      );
+      logApiRequest(request, url, response);
+      return response;
+    }
+
     if (url.pathname === "/api/catalog/save-active") {
       let response;
       if (request.method !== "POST") {

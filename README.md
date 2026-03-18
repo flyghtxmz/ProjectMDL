@@ -72,6 +72,7 @@ npm run deploy
 - `POST /api/endpoints/:id/activate`: troca o endpoint ativo
 - `GET /api/health`: mostra o endpoint ativo
 - `GET /api/catalog`: retorna o catálogo central e metadados
+- `GET /catalog.json`: snapshot público simples do catálogo central
 - `PUT /api/catalog`: persiste o estado atual do catálogo salvo pela UI
 - `POST /api/catalog/save-active`: consulta o catálogo do endpoint ativo e o persiste no catálogo central
 - `POST /api/catalog/import`: recebe catálogo enviado pelo ComfyUI/Modal e faz merge/upsert por `entry_id`
