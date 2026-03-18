@@ -10,8 +10,7 @@
   "kv_namespaces": [
     {
       "binding": "MODAL_ROUTER_KV",
-      "id": "PUT_YOUR_KV_NAMESPACE_ID_HERE",
-      "preview_id": "PUT_YOUR_KV_PREVIEW_ID_HERE"
+      "id": "c71c88aca2bb41bba9d26fe4518833a1"
     }
   ],
   "vars": {
