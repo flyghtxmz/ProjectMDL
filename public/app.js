@@ -839,7 +839,7 @@ async function saveCatalogEntries() {
         method: "POST",
       });
       setStatus(
-        `Catalogo sincronizado do endpoint ativo ${payload.endpointLabel || payload.endpointId || ""}. ${payload.upserted || 0} entradas importadas.`
+        `Catalogo sincronizado do endpoint ativo ${payload.endpointLabel || payload.endpointId || ""}. ${payload.upserted || 0} entradas importadas. URL: ${payload.sourceUrl || "nao informada"}.`
       );
     }
     state.catalogDirty = false;

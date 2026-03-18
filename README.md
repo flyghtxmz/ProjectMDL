@@ -95,11 +95,15 @@ Quando o dashboard nao tem edicoes locais pendentes, o botao `Salvar Catalogo` t
 
 Por padrao, o Worker tenta estes caminhos no endpoint ativo:
 
+- `/comfyui/catalog`
+- `/comfyui/catalog.json`
 - `/comfyui-modal/catalog`
 - `/comfyui-modal/catalog.json`
 - `/catalog`
 
 Se o endpoint de status devolver `catalog_endpoint`, `catalog_url` ou `catalog_api_endpoint`, esse caminho tem prioridade.
+
+Se a URL salva do endpoint ativo vier com um sufixo como `/comfyui/api/run-workflow`, o Worker normaliza para a base do deploy antes de montar a URL do catálogo.
 
 ## Observação importante
 

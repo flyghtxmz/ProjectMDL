@@ -4,6 +4,8 @@ const CATALOG_ENTRY_KEY_PREFIX = "catalog:entry:";
 const CATALOG_META_KEY = "catalog:meta";
 const DEFAULT_STATUS_PATH = "/comfyui-modal/status";
 const DEFAULT_ACTIVE_CATALOG_PATHS = [
+  "/comfyui/catalog",
+  "/comfyui/catalog.json",
   "/comfyui-modal/catalog",
   "/comfyui-modal/catalog.json",
   "/catalog",
@@ -418,6 +420,10 @@ async function handleCatalogImport(request, env) {
     return jsonResponse({ error: error.message }, { status: 400 });
   }
 
+  return jsonResponse(await importCatalogPayload(env, normalized));
+}
+
+async function importCatalogPayload(env, normalized) {
   const result = await upsertCatalogEntries(env, normalized.entries, {
     source: normalized.source,
     app: normalized.app,
@@ -429,11 +435,11 @@ async function handleCatalogImport(request, env) {
     received: normalized.entries.length,
   });
 
-  return jsonResponse({
+  return {
     ok: true,
     received: normalized.entries.length,
     upserted: result.upserted,
-  });
+  };
 }
 
 async function handleCatalogSave(request, env) {
@@ -517,17 +523,20 @@ async function handleActiveCatalogSave(env) {
         ? await response.json()
         : await response.text();
       if (!response.ok) {
-        lastError =
+        lastError = `${candidateUrl} -> ${
           typeof payload === "string"
             ? payload.slice(0, 240)
-            : payload?.error || `HTTP ${response.status}`;
+            : payload?.error || `HTTP ${response.status}`
+        }`;
         continue;
       }
       selectedUrl = candidateUrl;
       remotePayload = payload;
       break;
     } catch (error) {
-      lastError = error instanceof Error ? error.message : "Falha ao consultar o catalogo.";
+      lastError = `${candidateUrl} -> ${
+        error instanceof Error ? error.message : "Falha ao consultar o catalogo."
+      }`;
     }
   }
 
@@ -536,7 +545,7 @@ async function handleActiveCatalogSave(env) {
       {
         error:
           lastError ||
-          "Nao foi possivel consultar o catalogo do endpoint ativo. Verifique se ele expoe um endpoint de catalogo.",
+          `Nao foi possivel consultar o catalogo do endpoint ativo. URLs tentadas: ${catalogCandidateUrls.join(", ")}`,
         triedUrls: catalogCandidateUrls,
       },
       { status: 502 }
@@ -552,27 +561,18 @@ async function handleActiveCatalogSave(env) {
   } catch (error) {
     return jsonResponse(
       {
-        error: error.message,
+        error: `${error.message} URL consultada: ${selectedUrl}`,
         sourceUrl: selectedUrl,
       },
       { status: 400 }
     );
   }
 
-  const result = await upsertCatalogEntries(env, normalized.entries, {
-    source: normalized.source,
-    app: normalized.app,
-    endpointId: normalized.endpointId,
-    endpointLabel: normalized.endpointLabel,
-    bootId: normalized.bootId,
-    updatedAtUtc: normalized.updatedAtUtc,
-    reason: normalized.reason,
-    received: normalized.entries.length,
-  });
+  const result = await importCatalogPayload(env, normalized);
 
   return jsonResponse({
     ok: true,
-    received: normalized.entries.length,
+    received: result.received,
     upserted: result.upserted,
     sourceUrl: selectedUrl,
     endpointId: normalized.endpointId,
@@ -931,7 +931,7 @@ function compareCatalogEntries(left, right) {
 
 function buildActiveCatalogCandidateUrls(activeEndpoint, liveStatus) {
   const candidates = new Set();
-  const baseUrl = normalizeOptionalUrl(activeEndpoint?.url);
+  const baseUrl = normalizeActiveEndpointBaseUrl(activeEndpoint?.url);
   const explicitCandidates = [
     liveStatus?.catalogEndpoint,
     liveStatus?.catalogApiEndpoint,
@@ -953,6 +953,23 @@ function buildActiveCatalogCandidateUrls(activeEndpoint, liveStatus) {
   }
 
   return [...candidates];
+}
+
+function normalizeActiveEndpointBaseUrl(value) {
+  const normalizedUrl = normalizeOptionalUrl(value);
+  if (!normalizedUrl) {
+    return null;
+  }
+  const url = new URL(normalizedUrl);
+  const pathname = url.pathname.replace(/\/+$/, "");
+  const strippedPath = pathname.replace(
+    /\/(?:comfyui|comfyui-modal)\/api\/run-workflow$/i,
+    ""
+  );
+  url.pathname = strippedPath || "/";
+  url.search = "";
+  url.hash = "";
+  return url.toString().replace(/\/+$/, "");
 }
 
 async function handleConfigWrite(request, env) {
