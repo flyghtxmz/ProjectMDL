@@ -73,6 +73,7 @@ npm run deploy
 - `GET /api/health`: mostra o endpoint ativo
 - `GET /api/catalog`: retorna o catálogo central e metadados
 - `PUT /api/catalog`: persiste o estado atual do catálogo salvo pela UI
+- `POST /api/catalog/save-active`: consulta o catálogo do endpoint ativo e o persiste no catálogo central
 - `POST /api/catalog/import`: recebe catálogo enviado pelo ComfyUI/Modal e faz merge/upsert por `entry_id`
 - `POST /api/modal-registry/report`: recebe eventos do Modal e salva o ultimo estado por endpoint
 - `ALL /modal/*`: encaminha para o endpoint ativo
@@ -87,6 +88,18 @@ Neste momento o projeto está preparado para funcionar sem autenticação.
 - `ENABLE_REGISTRY_AUTH=true` ativa a proteção do registry por `MODAL_REGISTRY_TOKEN`
 
 Se essas flags não forem definidas, o dashboard e a importação de catálogo funcionam sem token.
+
+## Catalogo do endpoint ativo
+
+Quando o dashboard nao tem edicoes locais pendentes, o botao `Salvar Catalogo` tenta buscar o catalogo direto do endpoint ativo e importar no storage central.
+
+Por padrao, o Worker tenta estes caminhos no endpoint ativo:
+
+- `/comfyui-modal/catalog`
+- `/comfyui-modal/catalog.json`
+- `/catalog`
+
+Se o endpoint de status devolver `catalog_endpoint`, `catalog_url` ou `catalog_api_endpoint`, esse caminho tem prioridade.
 
 ## Observação importante
 

@@ -204,6 +204,9 @@ function renderOverview() {
     : state.catalogDirty
       ? "Salvar Catalogo*"
       : "Salvar Catalogo";
+  elements.saveCatalogButton.title = state.catalogDirty
+    ? "Persistir as edicoes locais do catalogo central."
+    : "Importar e persistir o catalogo do endpoint ativo.";
 }
 
 function renderCatalog() {
@@ -821,19 +824,29 @@ async function saveCatalogEntries() {
   try {
     state.catalogSaving = true;
     renderOverview();
-    const payload = await api("/api/catalog", {
-      method: "PUT",
-      body: {
-        entries: state.catalog.entries,
-        updatedAtUtc: new Date().toISOString(),
-      },
-    });
+    let payload;
+    if (state.catalogDirty) {
+      payload = await api("/api/catalog", {
+        method: "PUT",
+        body: {
+          entries: state.catalog.entries,
+          updatedAtUtc: new Date().toISOString(),
+        },
+      });
+      setStatus(`Catalogo salvo com sucesso. ${payload.upserted || 0} entradas persistidas.`);
+    } else {
+      payload = await api("/api/catalog/save-active", {
+        method: "POST",
+      });
+      setStatus(
+        `Catalogo sincronizado do endpoint ativo ${payload.endpointLabel || payload.endpointId || ""}. ${payload.upserted || 0} entradas importadas.`
+      );
+    }
     state.catalogDirty = false;
     state.catalogDirtyEntryIds = {};
     state.catalog = await api("/api/catalog");
     renderOverview();
     renderCatalog();
-    setStatus(`Catalogo salvo com sucesso. ${payload.upserted || 0} entradas persistidas.`);
   } catch (error) {
     setStatus(error.message, true);
   } finally {

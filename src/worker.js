@@ -3,6 +3,11 @@ const REGISTRY_KEY_PREFIX = "registry:endpoint:";
 const CATALOG_ENTRY_KEY_PREFIX = "catalog:entry:";
 const CATALOG_META_KEY = "catalog:meta";
 const DEFAULT_STATUS_PATH = "/comfyui-modal/status";
+const DEFAULT_ACTIVE_CATALOG_PATHS = [
+  "/comfyui-modal/catalog",
+  "/comfyui-modal/catalog.json",
+  "/catalog",
+];
 const DASHBOARD_PATH_PREFIX = "/dashboard";
 const PROXY_SLUG_PREFIX = "cmfy_";
 const MAX_RECENT_CATALOG_SYNCS = 12;
@@ -53,6 +58,13 @@ export default {
         return withCors(await handleCatalogSave(request, env));
       }
       return withCors(methodNotAllowed(["GET", "PUT"]));
+    }
+
+    if (url.pathname === "/api/catalog/save-active") {
+      if (request.method !== "POST") {
+        return withCors(methodNotAllowed(["POST"]));
+      }
+      return withCors(await handleActiveCatalogSave(env));
     }
 
     if (url.pathname === "/api/catalog/import") {
@@ -472,6 +484,102 @@ async function handleCatalogSave(request, env) {
   });
 }
 
+async function handleActiveCatalogSave(env) {
+  const [config, registryByEndpointId] = await Promise.all([loadConfig(env), loadRegistry(env)]);
+  const active = getActiveEndpoint(config);
+  if (!active) {
+    return jsonResponse({ error: "Nenhum endpoint ativo configurado." }, { status: 503 });
+  }
+
+  const probeTarget = buildProbeTarget(
+    active.id,
+    active.name,
+    active.url,
+    registryByEndpointId[active.id] || null
+  );
+  const liveStatus = probeTarget ? await probeEndpointStatus(probeTarget) : null;
+  const catalogCandidateUrls = buildActiveCatalogCandidateUrls(active, liveStatus);
+
+  let selectedUrl = null;
+  let remotePayload = null;
+  let lastError = null;
+  for (const candidateUrl of catalogCandidateUrls) {
+    try {
+      const response = await fetch(candidateUrl, {
+        method: "GET",
+        headers: {
+          accept: "application/json, text/plain;q=0.9, */*;q=0.8",
+          "cache-control": "no-store",
+        },
+      });
+      const contentType = response.headers.get("content-type") || "";
+      const payload = contentType.includes("application/json")
+        ? await response.json()
+        : await response.text();
+      if (!response.ok) {
+        lastError =
+          typeof payload === "string"
+            ? payload.slice(0, 240)
+            : payload?.error || `HTTP ${response.status}`;
+        continue;
+      }
+      selectedUrl = candidateUrl;
+      remotePayload = payload;
+      break;
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : "Falha ao consultar o catalogo.";
+    }
+  }
+
+  if (!remotePayload) {
+    return jsonResponse(
+      {
+        error:
+          lastError ||
+          "Nao foi possivel consultar o catalogo do endpoint ativo. Verifique se ele expoe um endpoint de catalogo.",
+        triedUrls: catalogCandidateUrls,
+      },
+      { status: 502 }
+    );
+  }
+
+  let normalized;
+  try {
+    normalized = normalizeRemoteCatalogPayload(remotePayload, {
+      activeEndpoint: active,
+      liveStatus,
+    });
+  } catch (error) {
+    return jsonResponse(
+      {
+        error: error.message,
+        sourceUrl: selectedUrl,
+      },
+      { status: 400 }
+    );
+  }
+
+  const result = await upsertCatalogEntries(env, normalized.entries, {
+    source: normalized.source,
+    app: normalized.app,
+    endpointId: normalized.endpointId,
+    endpointLabel: normalized.endpointLabel,
+    bootId: normalized.bootId,
+    updatedAtUtc: normalized.updatedAtUtc,
+    reason: normalized.reason,
+    received: normalized.entries.length,
+  });
+
+  return jsonResponse({
+    ok: true,
+    received: normalized.entries.length,
+    upserted: result.upserted,
+    sourceUrl: selectedUrl,
+    endpointId: normalized.endpointId,
+    endpointLabel: normalized.endpointLabel,
+  });
+}
+
 async function loadCatalog(env) {
   const [entries, meta] = await Promise.all([loadCatalogEntries(env), loadCatalogMeta(env)]);
   return { entries, meta };
@@ -636,6 +744,57 @@ function normalizeCatalogImportPayload(payload) {
   };
 }
 
+function normalizeRemoteCatalogPayload(payload, context = {}) {
+  const remoteEntries = Array.isArray(payload)
+    ? payload
+    : Array.isArray(payload?.entries)
+      ? payload.entries
+      : Array.isArray(payload?.catalog?.entries)
+        ? payload.catalog.entries
+        : null;
+
+  if (!remoteEntries) {
+    throw new Error("O endpoint ativo nao retornou um catalogo valido.");
+  }
+
+  const activeEndpoint = context.activeEndpoint || null;
+  const liveStatus = context.liveStatus || null;
+  const updatedAtUtc =
+    normalizeOptionalTimestamp(payload?.updated_at_utc) ||
+    normalizeOptionalTimestamp(payload?.updatedAtUtc) ||
+    liveStatus?.checkedAtUtc ||
+    new Date().toISOString();
+
+  return {
+    source: normalizeOptionalText(payload?.source) || "active-endpoint",
+    app:
+      normalizeOptionalText(payload?.app) ||
+      normalizeOptionalText(liveStatus?.app) ||
+      "comfyui-modal",
+    endpointId: activeEndpoint?.id || normalizeOptionalText(payload?.endpoint_id),
+    endpointLabel:
+      activeEndpoint?.name ||
+      normalizeOptionalText(payload?.endpoint_label) ||
+      normalizeOptionalText(liveStatus?.endpointLabel),
+    bootId:
+      normalizeOptionalText(payload?.boot_id) ||
+      normalizeOptionalText(liveStatus?.bootId),
+    updatedAtUtc,
+    reason: normalizeOptionalText(payload?.reason) || "manual",
+    entries: remoteEntries.map((entry) =>
+      normalizeCatalogEntry(entry, {
+        source: payload?.source || "active-endpoint",
+        app: payload?.app || liveStatus?.app || "comfyui-modal",
+        endpointId: activeEndpoint?.id || payload?.endpoint_id,
+        endpointLabel: activeEndpoint?.name || payload?.endpoint_label,
+        bootId: payload?.boot_id || liveStatus?.bootId,
+        updatedAtUtc,
+        reason: payload?.reason || "manual",
+      })
+    ),
+  };
+}
+
 function normalizeCatalogEntry(entry, context = {}) {
   const entryId =
     normalizeOptionalText(entry?.entryId) ||
@@ -768,6 +927,32 @@ function compareCatalogEntries(left, right) {
   const leftUpdated = left?.updatedAtUtc || left?.timestampUtc || "";
   const rightUpdated = right?.updatedAtUtc || right?.timestampUtc || "";
   return String(leftUpdated).localeCompare(String(rightUpdated));
+}
+
+function buildActiveCatalogCandidateUrls(activeEndpoint, liveStatus) {
+  const candidates = new Set();
+  const baseUrl = normalizeOptionalUrl(activeEndpoint?.url);
+  const explicitCandidates = [
+    liveStatus?.catalogEndpoint,
+    liveStatus?.catalogApiEndpoint,
+    activeEndpoint?.catalogUrl,
+  ];
+
+  for (const candidate of explicitCandidates) {
+    const resolved = resolveUrlAgainstBase(candidate, baseUrl);
+    if (resolved) {
+      candidates.add(resolved);
+    }
+  }
+
+  for (const path of DEFAULT_ACTIVE_CATALOG_PATHS) {
+    const resolved = resolveUrlAgainstBase(path, baseUrl);
+    if (resolved) {
+      candidates.add(resolved);
+    }
+  }
+
+  return [...candidates];
 }
 
 async function handleConfigWrite(request, env) {
@@ -1171,6 +1356,10 @@ function normalizeEndpointStatusPayload(target, payload, httpStatus) {
       typeof payload?.uptime_seconds === "number" ? Number(payload.uptime_seconds) : null,
     gpuType: normalizeOptionalText(payload?.gpu_type),
     statusEndpoint: resolveUrlAgainstBase(payload?.status_endpoint, target.baseUrl) || target.statusUrl,
+    catalogEndpoint:
+      resolveUrlAgainstBase(payload?.catalog_endpoint, target.baseUrl) ||
+      resolveUrlAgainstBase(payload?.catalog_url, target.baseUrl),
+    catalogApiEndpoint: resolveUrlAgainstBase(payload?.catalog_api_endpoint, target.baseUrl),
     workflowApiEndpoint: resolveUrlAgainstBase(payload?.workflow_api_endpoint, target.baseUrl),
     promptStatusEndpoint: resolveUrlAgainstBase(payload?.prompt_status_endpoint, target.baseUrl),
     publicBaseUrl: normalizeOptionalUrl(target.baseUrl),
