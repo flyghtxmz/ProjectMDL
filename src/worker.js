@@ -56,27 +56,50 @@ export default {
     }
 
     if (url.pathname === "/api/catalog") {
+      let response;
       if (request.method === "GET") {
-        return withCors(jsonResponse(await buildCatalogPayload(env)));
+        response = withCors(
+          jsonResponse(await buildCatalogPayload(env), {
+            headers: {
+              "cache-control": "no-store",
+            },
+          })
+        );
+        logApiRequest(request, url, response);
+        return response;
       }
       if (request.method === "PUT") {
-        return withCors(await handleCatalogSave(request, env));
+        response = withCors(await handleCatalogSave(request, env));
+        logApiRequest(request, url, response);
+        return response;
       }
-      return withCors(methodNotAllowed(["GET", "PUT"]));
+      response = withCors(methodNotAllowed(["GET", "PUT"]));
+      logApiRequest(request, url, response);
+      return response;
     }
 
     if (url.pathname === "/api/catalog/save-active") {
+      let response;
       if (request.method !== "POST") {
-        return withCors(methodNotAllowed(["POST"]));
+        response = withCors(methodNotAllowed(["POST"]));
+        logApiRequest(request, url, response);
+        return response;
       }
-      return withCors(await handleActiveCatalogSave(env));
+      response = withCors(await handleActiveCatalogSave(env));
+      logApiRequest(request, url, response);
+      return response;
     }
 
     if (url.pathname === "/api/catalog/import") {
+      let response;
       if (request.method !== "POST") {
-        return withCors(methodNotAllowed(["POST"]));
+        response = withCors(methodNotAllowed(["POST"]));
+        logApiRequest(request, url, response);
+        return response;
       }
-      return withCors(await handleCatalogImport(request, env));
+      response = withCors(await handleCatalogImport(request, env));
+      logApiRequest(request, url, response);
+      return response;
     }
 
     if (url.pathname === "/api/endpoint-statuses") {
@@ -222,6 +245,21 @@ function withCors(response) {
     statusText: response.statusText,
     headers,
   });
+}
+
+function logApiRequest(request, url, response) {
+  const logPayload = {
+    method: request.method,
+    path: url.pathname,
+    status: response.status,
+    userAgent: request.headers.get("user-agent") || "",
+  };
+  if (response.status === 401) {
+    logPayload.reason = "unauthorized";
+  } else if (response.status === 403) {
+    logPayload.reason = "forbidden";
+  }
+  console.log(`[projectmdl] ${JSON.stringify(logPayload)}`);
 }
 
 function methodNotAllowed(allowedMethods) {
