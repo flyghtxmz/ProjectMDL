@@ -824,25 +824,34 @@ async function saveCatalogEntries() {
   try {
     state.catalogSaving = true;
     renderOverview();
-    let payload;
-    if (state.catalogDirty) {
-      payload = await api("/api/catalog", {
+    const pendingLocalEntries = collectPendingCatalogEntries();
+    const activeSyncPayload = await api("/api/catalog/save-active", {
+      method: "POST",
+    });
+
+    let message = buildCatalogSaveMessage(
+      activeSyncPayload,
+      `Catalogo sincronizado do endpoint ativo ${activeSyncPayload.endpointLabel || activeSyncPayload.endpointId || ""}. URL: ${activeSyncPayload.sourceUrl || "nao informada"}.`
+    );
+    let nextCatalog = await api("/api/catalog");
+
+    if (pendingLocalEntries.length) {
+      const mergedEntries = mergeCatalogEntriesForSave(nextCatalog.entries, pendingLocalEntries);
+      const savePayload = await api("/api/catalog", {
         method: "PUT",
         body: {
-          entries: state.catalog.entries,
+          entries: mergedEntries,
           updatedAtUtc: new Date().toISOString(),
         },
       });
-      setStatus(buildCatalogSaveMessage(payload, "Catalogo salvo com sucesso."));
-    } else {
-      payload = await api("/api/catalog/save-active", {
-        method: "POST",
-      });
-      setStatus(buildCatalogSaveMessage(payload, `Catalogo sincronizado do endpoint ativo ${payload.endpointLabel || payload.endpointId || ""}. URL: ${payload.sourceUrl || "nao informada"}.`));
+      message = `${message} ${buildCatalogSaveMessage(savePayload, "Edicoes locais aplicadas ao catalogo central.")}`;
+      nextCatalog = await api("/api/catalog");
     }
+
+    setStatus(message);
     state.catalogDirty = false;
     state.catalogDirtyEntryIds = {};
-    state.catalog = await api("/api/catalog");
+    state.catalog = nextCatalog;
     renderOverview();
     renderCatalog();
   } catch (error) {
@@ -861,6 +870,38 @@ function buildCatalogSaveMessage(payload, prefix) {
     parts.push(`Falha ao publicar no GitHub: ${payload.github.error}`);
   }
   return parts.join(" ");
+}
+
+function collectPendingCatalogEntries() {
+  if (!state.catalogDirty) {
+    return [];
+  }
+  const dirtyIds = new Set(
+    Object.entries(state.catalogDirtyEntryIds || {})
+      .filter(([, isDirty]) => Boolean(isDirty))
+      .map(([entryId]) => entryId)
+  );
+  if (!dirtyIds.size) {
+    return [];
+  }
+  return state.catalog.entries
+    .filter((entry) => dirtyIds.has(entry.entryId))
+    .map((entry) => ({ ...entry }));
+}
+
+function mergeCatalogEntriesForSave(baseEntries, pendingEntries) {
+  const byId = new Map((Array.isArray(baseEntries) ? baseEntries : []).map((entry) => [entry.entryId, { ...entry }]));
+  for (const pendingEntry of pendingEntries) {
+    if (!pendingEntry?.entryId) {
+      continue;
+    }
+    const existing = byId.get(pendingEntry.entryId) || {};
+    byId.set(pendingEntry.entryId, {
+      ...existing,
+      ...pendingEntry,
+    });
+  }
+  return Array.from(byId.values());
 }
 
 async function saveConfig(nextConfig) {
