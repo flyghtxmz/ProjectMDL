@@ -140,16 +140,47 @@ async function refreshCatalog(options = {}) {
   if (!options.force && !confirmCatalogRefreshLoss()) {
     return;
   }
+  let openedConsoleGroup = false;
   try {
+    console.group("[projectmdl] Atualizar catalogo");
+    openedConsoleGroup = true;
+    console.log("action", "refresh-catalog");
+    console.log("readsCentralCatalogOnly", true);
+    console.log("catalogDirty", state.catalogDirty);
+    console.log("activeEndpointId", state.config.activeEndpointId || null);
+    console.log("activeEndpointName", state.config.activeEndpoint?.name || null);
+    console.log("activeEndpointUrl", state.config.activeEndpoint?.url || null);
+    console.log("request", "GET /api/catalog");
     state.catalog = await api("/api/catalog");
+    console.log("response.totalEntries", state.catalog.totalEntries || state.catalog.entries?.length || 0);
+    console.log("response.lastUpdated", state.catalog.lastUpdated || null);
+    console.log("response.recentSync", state.catalog.recentSyncs?.[0] || null);
+    console.log(
+      "note",
+      "Este botao le apenas o catalogo central salvo no Dashboard. Para puxar do endpoint ativo, use 'Salvar Catalogo'."
+    );
+    console.log("payload", state.catalog);
+    console.groupEnd();
+    openedConsoleGroup = false;
     state.catalogDirty = false;
     state.catalogDirtyEntryIds = {};
     renderCatalog();
     renderOverview();
     if (options.showStatus) {
-      setStatus("Catalogo atualizado.");
+      setStatus(
+        "Catalogo central atualizado. Para puxar do endpoint ativo do Modal, use Salvar Catalogo."
+      );
     }
   } catch (error) {
+    console.error("[projectmdl] Atualizar catalogo falhou", {
+      activeEndpointId: state.config.activeEndpointId || null,
+      activeEndpointName: state.config.activeEndpoint?.name || null,
+      activeEndpointUrl: state.config.activeEndpoint?.url || null,
+      error: error?.message || String(error),
+    });
+    if (openedConsoleGroup) {
+      console.groupEnd();
+    }
     setStatus(error.message, true);
   }
 }
