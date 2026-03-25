@@ -498,6 +498,96 @@ button:disabled {
   background: rgba(140, 224, 255, 0.05);
 }
 
+.files-panel {
+  margin-top: 20px;
+}
+
+.files-tabs {
+  display: inline-flex;
+  gap: 8px;
+  margin-bottom: 14px;
+  padding: 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(155, 177, 194, 0.12);
+}
+
+.tab-button {
+  padding: 10px 14px;
+  background: transparent;
+  color: var(--muted);
+}
+
+.tab-button.is-active {
+  background: rgba(140, 224, 255, 0.14);
+  color: var(--accent);
+}
+
+.files-status {
+  margin-bottom: 14px;
+  padding: 12px 14px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.files-table-wrap {
+  overflow-x: auto;
+  border-radius: 18px;
+  border: 1px solid rgba(155, 177, 194, 0.12);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.files-table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 980px;
+}
+
+.files-table th,
+.files-table td {
+  padding: 12px 14px;
+  border-bottom: 1px solid rgba(155, 177, 194, 0.08);
+  text-align: left;
+  vertical-align: top;
+}
+
+.files-table th {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.file-preview-cell {
+  width: 120px;
+  color: var(--muted);
+}
+
+.file-preview-image {
+  display: block;
+  width: 88px;
+  height: 88px;
+  object-fit: cover;
+  border-radius: 14px;
+  border: 1px solid rgba(155, 177, 194, 0.12);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.file-path-cell {
+  color: var(--muted);
+  min-width: 260px;
+  word-break: break-word;
+}
+
+.file-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 @media (max-width: 900px) {
   .hero,
   .grid,

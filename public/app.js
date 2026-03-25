@@ -25,11 +25,35 @@ const state = {
   catalogDirty: false,
   catalogDirtyEntryIds: {},
   catalogSaving: false,
+  activeFiles: {
+    activeTab: "workflows",
+    loadingKind: null,
+    deletingKey: null,
+    byKind: {
+      workflows: {
+        items: [],
+        endpointId: null,
+        endpointName: null,
+        sourceUrl: null,
+        loadedAtUtc: null,
+        error: null,
+      },
+      images: {
+        items: [],
+        endpointId: null,
+        endpointName: null,
+        sourceUrl: null,
+        loadedAtUtc: null,
+        error: null,
+      },
+    },
+  },
 };
 
 const elements = {
   refreshButton: document.getElementById("refresh-button"),
   refreshCatalogButton: document.getElementById("refresh-catalog-button"),
+  refreshFilesButton: document.getElementById("refresh-files-button"),
   saveCatalogButton: document.getElementById("save-catalog-button"),
   statusBox: document.getElementById("status-box"),
   proxyBase: document.getElementById("proxy-base"),
@@ -44,6 +68,11 @@ const elements = {
   catalogProviderFilter: document.getElementById("catalog-provider-filter"),
   catalogCategoryFilter: document.getElementById("catalog-category-filter"),
   catalogTableBody: document.getElementById("catalog-table-body"),
+  filesCounter: document.getElementById("files-counter"),
+  filesStatus: document.getElementById("files-status"),
+  filesTableBody: document.getElementById("files-table-body"),
+  filesTabWorkflows: document.getElementById("files-tab-workflows"),
+  filesTabImages: document.getElementById("files-tab-images"),
   endpointList: document.getElementById("endpoint-list"),
   endpointTemplate: document.getElementById("endpoint-row-template"),
   endpointForm: document.getElementById("endpoint-form"),
@@ -72,8 +101,20 @@ function bindEvents() {
     refreshCatalog({ showStatus: true });
   });
 
+  elements.refreshFilesButton.addEventListener("click", () => {
+    refreshActiveFiles({ kind: state.activeFiles.activeTab, showStatus: true });
+  });
+
   elements.saveCatalogButton.addEventListener("click", () => {
     saveCatalogEntries();
+  });
+
+  elements.filesTabWorkflows.addEventListener("click", () => {
+    switchFilesTab("workflows");
+  });
+
+  elements.filesTabImages.addEventListener("click", () => {
+    switchFilesTab("images");
   });
 
   elements.cancelEditButton.addEventListener("click", resetForm);
@@ -116,11 +157,20 @@ async function refreshConfig(options = {}) {
       api("/api/catalog"),
       refreshEndpointStatuses(),
     ]);
+    const previousActiveEndpointId = state.config.activeEndpoint?.id || state.config.activeEndpointId;
     state.config = config;
     state.catalog = catalog;
     state.catalogDirty = false;
     state.catalogDirtyEntryIds = {};
+    if (previousActiveEndpointId !== (config.activeEndpoint?.id || config.activeEndpointId)) {
+      resetActiveFilesState();
+    }
     render();
+    await refreshActiveFiles({
+      kind: state.activeFiles.activeTab,
+      showStatus: false,
+      suppressMissingActive: true,
+    });
     if (options.showStatus) {
       if (statusError) {
         setStatus(
@@ -214,6 +264,7 @@ function render() {
   renderOverview();
   renderEndpointList(displayEndpoints);
   renderCatalog();
+  renderFiles();
 }
 
 function renderOverview() {
@@ -247,6 +298,135 @@ function renderCatalog() {
   elements.catalogSyncSummary.textContent = buildCatalogSyncSummary();
   renderCatalogFilterOptions();
   renderCatalogTable(entries);
+}
+
+function renderFiles() {
+  const kind = state.activeFiles.activeTab;
+  const bucket = state.activeFiles.byKind[kind];
+  const activeEndpoint = state.config.activeEndpoint;
+  const isLoading = state.activeFiles.loadingKind === kind;
+
+  elements.filesTabWorkflows.classList.toggle("is-active", kind === "workflows");
+  elements.filesTabWorkflows.setAttribute("aria-selected", String(kind === "workflows"));
+  elements.filesTabImages.classList.toggle("is-active", kind === "images");
+  elements.filesTabImages.setAttribute("aria-selected", String(kind === "images"));
+  elements.refreshFilesButton.disabled = !activeEndpoint || isLoading;
+  elements.refreshFilesButton.textContent = isLoading ? "Atualizando..." : "Atualizar arquivos";
+
+  if (!activeEndpoint) {
+    elements.filesCounter.textContent = "Nenhum endpoint ativo";
+    elements.filesStatus.textContent =
+      "Ative um endpoint para consultar workflows e imagens persistidas.";
+    renderFilesTable([]);
+    return;
+  }
+
+  elements.filesCounter.textContent = `${bucket.items.length} ${
+    kind === "workflows" ? "workflow(s)" : "imagem(ns)"
+  } | endpoint ativo: ${activeEndpoint.name}`;
+  elements.filesStatus.textContent = buildFilesStatusText(kind, bucket, activeEndpoint, isLoading);
+  renderFilesTable(bucket.items, kind);
+}
+
+function buildFilesStatusText(kind, bucket, activeEndpoint, isLoading) {
+  if (isLoading) {
+    return `Consultando ${kind === "workflows" ? "workflows" : "imagens"} persistidos de ${activeEndpoint.name}...`;
+  }
+  if (bucket.error) {
+    return bucket.error;
+  }
+  if (!bucket.loadedAtUtc) {
+    return `Nenhuma consulta feita ainda para ${kind === "workflows" ? "workflows" : "imagens"} do endpoint ativo.`;
+  }
+  const parts = [
+    `Origem: ${bucket.sourceUrl || activeEndpoint.url}`,
+    `Atualizado: ${formatTimestamp(bucket.loadedAtUtc)}`,
+  ];
+  if (bucket.endpointName) {
+    parts.push(`Endpoint: ${bucket.endpointName}`);
+  }
+  return parts.join(" | ");
+}
+
+function renderFilesTable(items, kind) {
+  elements.filesTableBody.innerHTML = "";
+  if (!items.length) {
+    const emptyRow = document.createElement("tr");
+    const cell = document.createElement("td");
+    cell.colSpan = 6;
+    cell.className = "catalog-empty";
+    cell.textContent = `Nenhum ${kind === "workflows" ? "workflow" : "arquivo de imagem"} encontrado.`;
+    emptyRow.append(cell);
+    elements.filesTableBody.append(emptyRow);
+    return;
+  }
+
+  for (const item of items) {
+    const row = document.createElement("tr");
+    row.append(
+      buildFilePreviewCell(item, kind),
+      buildFileTextCell(item.name),
+      buildFileTextCell(item.relativePath, "file-path-cell"),
+      buildFileTextCell(item.modifiedAtUtc ? formatTimestamp(item.modifiedAtUtc) : "sem data", "catalog-meta-cell"),
+      buildFileTextCell(formatBytes(item.sizeBytes), "catalog-meta-cell"),
+      buildFileActionsCell(item, kind)
+    );
+    elements.filesTableBody.append(row);
+  }
+}
+
+function buildFilePreviewCell(item, kind) {
+  const cell = document.createElement("td");
+  cell.className = "file-preview-cell";
+  if (kind !== "images") {
+    cell.textContent = "—";
+    return cell;
+  }
+
+  const image = document.createElement("img");
+  image.className = "file-preview-image";
+  image.alt = item.name;
+  image.loading = "lazy";
+  image.src = buildActiveFilePreviewUrl(kind, item.relativePath);
+  image.addEventListener("error", () => {
+    cell.textContent = "sem preview";
+  });
+  cell.append(image);
+  return cell;
+}
+
+function buildFileTextCell(text, className = "") {
+  const cell = document.createElement("td");
+  if (className) {
+    cell.className = className;
+  }
+  cell.textContent = text;
+  return cell;
+}
+
+function buildFileActionsCell(item, kind) {
+  const cell = document.createElement("td");
+  const wrapper = document.createElement("div");
+  wrapper.className = "file-actions";
+
+  const downloadLink = document.createElement("a");
+  downloadLink.className = "endpoint-link";
+  downloadLink.textContent = "Baixar";
+  downloadLink.href = buildActiveFileDownloadUrl(kind, item.relativePath);
+  downloadLink.rel = "noreferrer";
+  downloadLink.target = "_blank";
+
+  const deleteButton = document.createElement("button");
+  deleteButton.type = "button";
+  deleteButton.className = "danger-button";
+  deleteButton.textContent =
+    state.activeFiles.deletingKey === `${kind}:${item.relativePath}` ? "Deletando..." : "Deletar";
+  deleteButton.disabled = state.activeFiles.deletingKey === `${kind}:${item.relativePath}`;
+  deleteButton.addEventListener("click", () => deleteActiveFile(kind, item));
+
+  wrapper.append(downloadLink, deleteButton);
+  cell.append(wrapper);
+  return cell;
 }
 
 function renderCatalogFilterOptions() {
@@ -752,6 +932,22 @@ function formatDurationSeconds(value) {
   return `${seconds}s`;
 }
 
+function formatBytes(value) {
+  const size = Number(value || 0);
+  if (!Number.isFinite(size) || size <= 0) {
+    return "0 B";
+  }
+  const units = ["B", "KB", "MB", "GB"];
+  let unitIndex = 0;
+  let current = size;
+  while (current >= 1024 && unitIndex < units.length - 1) {
+    current /= 1024;
+    unitIndex += 1;
+  }
+  const precision = current >= 10 || unitIndex === 0 ? 0 : 1;
+  return `${current.toFixed(precision)} ${units[unitIndex]}`;
+}
+
 function buildConfigWithFormChanges() {
   const id = elements.endpointId.value.trim() || crypto.randomUUID();
   const entry = {
@@ -825,6 +1021,125 @@ async function refreshSingleEndpointStatus(endpointId, endpointName) {
     delete state.refreshingEndpointIds[endpointId];
     render();
   }
+}
+
+function switchFilesTab(kind) {
+  if (!state.activeFiles.byKind[kind] || state.activeFiles.activeTab === kind) {
+    return;
+  }
+  state.activeFiles.activeTab = kind;
+  renderFiles();
+  const bucket = state.activeFiles.byKind[kind];
+  const activeEndpointId = state.config.activeEndpoint?.id || null;
+  if (!bucket.loadedAtUtc || bucket.endpointId !== activeEndpointId) {
+    refreshActiveFiles({ kind, showStatus: false, suppressMissingActive: true });
+  }
+}
+
+function resetActiveFilesState() {
+  state.activeFiles.loadingKind = null;
+  state.activeFiles.deletingKey = null;
+  state.activeFiles.byKind = {
+    workflows: {
+      items: [],
+      endpointId: null,
+      endpointName: null,
+      sourceUrl: null,
+      loadedAtUtc: null,
+      error: null,
+    },
+    images: {
+      items: [],
+      endpointId: null,
+      endpointName: null,
+      sourceUrl: null,
+      loadedAtUtc: null,
+      error: null,
+    },
+  };
+}
+
+async function refreshActiveFiles(options = {}) {
+  const kind = options.kind || state.activeFiles.activeTab;
+  const activeEndpoint = state.config.activeEndpoint;
+  if (!activeEndpoint) {
+    if (!options.suppressMissingActive) {
+      setStatus("Nenhum endpoint ativo configurado para consultar arquivos.", true);
+    }
+    renderFiles();
+    return;
+  }
+
+  state.activeFiles.loadingKind = kind;
+  state.activeFiles.byKind[kind].error = null;
+  renderFiles();
+
+  try {
+    const payload = await api(`/api/active-files/${kind}`);
+    state.activeFiles.byKind[kind] = {
+      items: Array.isArray(payload.items) ? payload.items : [],
+      endpointId: payload.endpointId || activeEndpoint.id,
+      endpointName: payload.endpointName || activeEndpoint.name,
+      sourceUrl: payload.sourceUrl || null,
+      loadedAtUtc: new Date().toISOString(),
+      error: null,
+    };
+    if (options.showStatus) {
+      setStatus(
+        `${kind === "workflows" ? "Workflows" : "Imagens"} carregados do endpoint ativo ${payload.endpointName || activeEndpoint.name}.`
+      );
+    }
+  } catch (error) {
+    state.activeFiles.byKind[kind] = {
+      ...state.activeFiles.byKind[kind],
+      items: [],
+      endpointId: activeEndpoint.id,
+      endpointName: activeEndpoint.name,
+      sourceUrl: null,
+      loadedAtUtc: null,
+      error: error.message,
+    };
+    if (options.showStatus) {
+      setStatus(error.message, true);
+    }
+  } finally {
+    state.activeFiles.loadingKind = null;
+    renderFiles();
+  }
+}
+
+async function deleteActiveFile(kind, item) {
+  if (!confirm(`Deletar "${item.name}" do endpoint ativo?`)) {
+    return;
+  }
+  const deletingKey = `${kind}:${item.relativePath}`;
+  state.activeFiles.deletingKey = deletingKey;
+  renderFiles();
+  try {
+    const payload = await api(`/api/active-files/${kind}/delete`, {
+      method: "POST",
+      body: {
+        path: item.relativePath,
+      },
+    });
+    setStatus(
+      `${kind === "workflows" ? "Workflow" : "Arquivo"} removido do endpoint ativo: ${payload.deletedPath || item.relativePath}.`
+    );
+    await refreshActiveFiles({ kind, showStatus: false, suppressMissingActive: true });
+  } catch (error) {
+    setStatus(error.message, true);
+  } finally {
+    state.activeFiles.deletingKey = null;
+    renderFiles();
+  }
+}
+
+function buildActiveFileDownloadUrl(kind, relativePath) {
+  return `/api/active-files/${kind}/download?path=${encodeURIComponent(relativePath)}`;
+}
+
+function buildActiveFilePreviewUrl(kind, relativePath) {
+  return `/api/active-files/${kind}/download?path=${encodeURIComponent(relativePath)}&inline=1`;
 }
 
 async function removeEndpoint(endpointId) {
@@ -936,13 +1251,22 @@ function mergeCatalogEntriesForSave(baseEntries, pendingEntries) {
 }
 
 async function saveConfig(nextConfig) {
+  const previousActiveEndpointId = state.config.activeEndpoint?.id || state.config.activeEndpointId;
   const payload = await api("/api/config", {
     method: "PUT",
     body: nextConfig,
   });
   state.config = payload;
+  if (previousActiveEndpointId !== (payload.activeEndpoint?.id || payload.activeEndpointId)) {
+    resetActiveFilesState();
+  }
   await refreshEndpointStatuses();
   render();
+  await refreshActiveFiles({
+    kind: state.activeFiles.activeTab,
+    showStatus: false,
+    suppressMissingActive: true,
+  });
 }
 
 async function api(path, options = {}) {

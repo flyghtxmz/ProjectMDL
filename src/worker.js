@@ -17,6 +17,20 @@ const DEFAULT_ACTIVE_CATALOG_PATHS = [
   "/comfyui-modal/catalog.json",
   "/catalog",
 ];
+const ACTIVE_FILE_ROUTE_CONFIG = {
+  workflows: {
+    label: "workflows",
+    listPath: "/comfyui/workflows",
+    downloadPath: "/comfyui/workflows/download",
+    deletePath: "/comfyui/workflows/delete",
+  },
+  images: {
+    label: "imagens",
+    listPath: "/comfyui/files/images",
+    downloadPath: "/comfyui/files/download",
+    deletePath: "/comfyui/files/delete",
+  },
+};
 const DASHBOARD_PATH_PREFIX = "/dashboard";
 const PROXY_SLUG_PREFIX = "cmfy_";
 const MAX_RECENT_CATALOG_SYNCS = 12;
@@ -122,6 +136,44 @@ export default {
       response = withCors(await handleCatalogImport(request, env));
       logApiRequest(request, url, response);
       return response;
+    }
+
+    const activeFilesMatch = url.pathname.match(
+      /^\/api\/active-files\/(workflows|images)(?:\/(download|delete))?$/
+    );
+    if (activeFilesMatch) {
+      const [, fileKind, action = "list"] = activeFilesMatch;
+      let response;
+      if (action === "list") {
+        if (request.method !== "GET") {
+          response = withCors(methodNotAllowed(["GET"]));
+          logApiRequest(request, url, response);
+          return response;
+        }
+        response = withCors(await handleActiveFilesList(env, fileKind));
+        logApiRequest(request, url, response);
+        return response;
+      }
+      if (action === "download") {
+        if (request.method !== "GET") {
+          response = withCors(methodNotAllowed(["GET"]));
+          logApiRequest(request, url, response);
+          return response;
+        }
+        response = withCors(await handleActiveFilesDownload(request, env, fileKind));
+        logApiRequest(request, url, response);
+        return response;
+      }
+      if (action === "delete") {
+        if (request.method !== "POST") {
+          response = withCors(methodNotAllowed(["POST"]));
+          logApiRequest(request, url, response);
+          return response;
+        }
+        response = withCors(await handleActiveFilesDelete(request, env, fileKind));
+        logApiRequest(request, url, response);
+        return response;
+      }
     }
 
     if (url.pathname === "/api/endpoint-statuses") {
@@ -655,6 +707,294 @@ async function handleActiveCatalogSave(env) {
     endpointId: normalized.endpointId,
     endpointLabel: normalized.endpointLabel,
     github: result.github,
+  });
+}
+
+async function handleActiveFilesList(env, fileKind) {
+  const routeConfig = ACTIVE_FILE_ROUTE_CONFIG[fileKind];
+  if (!routeConfig) {
+    return jsonResponse({ error: "Tipo de arquivo invalido." }, { status: 400 });
+  }
+
+  const context = await loadActiveFileAccessContext(env);
+  if (context.errorResponse) {
+    return context.errorResponse;
+  }
+
+  const sourceUrl = buildActiveFileEndpointUrl(context.baseUrl, routeConfig.listPath);
+  try {
+    const upstreamResponse = await fetch(sourceUrl, {
+      method: "GET",
+      headers: {
+        accept: "application/json, text/plain;q=0.9, */*;q=0.8",
+        "cache-control": "no-store",
+      },
+    });
+    const payload = await readUpstreamPayload(upstreamResponse);
+    if (!upstreamResponse.ok) {
+      return jsonResponse(
+        {
+          error: `Nao foi possivel consultar ${routeConfig.label} do endpoint ativo.`,
+          sourceUrl,
+          upstreamStatus: upstreamResponse.status,
+          upstreamBody: extractUpstreamError(payload),
+        },
+        { status: 502 }
+      );
+    }
+
+    return jsonResponse({
+      ok: true,
+      kind: fileKind,
+      endpointId: context.active.id,
+      endpointName: context.active.name,
+      sourceUrl,
+      items: normalizeActiveFileListPayload(payload),
+    });
+  } catch (error) {
+    return jsonResponse(
+      {
+        error: `Falha ao consultar ${routeConfig.label} do endpoint ativo.`,
+        sourceUrl,
+        detail: error instanceof Error ? error.message : "Erro inesperado.",
+      },
+      { status: 502 }
+    );
+  }
+}
+
+async function handleActiveFilesDownload(request, env, fileKind) {
+  const routeConfig = ACTIVE_FILE_ROUTE_CONFIG[fileKind];
+  if (!routeConfig) {
+    return jsonResponse({ error: "Tipo de arquivo invalido." }, { status: 400 });
+  }
+
+  const url = new URL(request.url);
+  const relativePath = String(url.searchParams.get("path") || "").trim();
+  if (!relativePath) {
+    return jsonResponse({ error: "O parametro path e obrigatorio." }, { status: 400 });
+  }
+
+  const context = await loadActiveFileAccessContext(env);
+  if (context.errorResponse) {
+    return context.errorResponse;
+  }
+
+  const sourceUrl = new URL(buildActiveFileEndpointUrl(context.baseUrl, routeConfig.downloadPath));
+  sourceUrl.searchParams.set("path", relativePath);
+
+  try {
+    const upstreamResponse = await fetch(sourceUrl, {
+      method: "GET",
+      headers: {
+        accept: "*/*",
+        "cache-control": "no-store",
+      },
+    });
+    if (!upstreamResponse.ok) {
+      const payload = await readUpstreamPayload(upstreamResponse);
+      return jsonResponse(
+        {
+          error: `Falha ao baixar ${routeConfig.label} do endpoint ativo.`,
+          sourceUrl: sourceUrl.toString(),
+          upstreamStatus: upstreamResponse.status,
+          upstreamBody: extractUpstreamError(payload),
+        },
+        { status: 502 }
+      );
+    }
+
+    const headers = new Headers(upstreamResponse.headers);
+    headers.set("cache-control", "no-store");
+    if (url.searchParams.get("inline") === "1") {
+      headers.delete("content-disposition");
+    }
+    return new Response(upstreamResponse.body, {
+      status: upstreamResponse.status,
+      statusText: upstreamResponse.statusText,
+      headers,
+    });
+  } catch (error) {
+    return jsonResponse(
+      {
+        error: `Falha ao baixar ${routeConfig.label} do endpoint ativo.`,
+        sourceUrl: sourceUrl.toString(),
+        detail: error instanceof Error ? error.message : "Erro inesperado.",
+      },
+      { status: 502 }
+    );
+  }
+}
+
+async function handleActiveFilesDelete(request, env, fileKind) {
+  const routeConfig = ACTIVE_FILE_ROUTE_CONFIG[fileKind];
+  if (!routeConfig) {
+    return jsonResponse({ error: "Tipo de arquivo invalido." }, { status: 400 });
+  }
+
+  let payload;
+  try {
+    payload = await request.json();
+  } catch {
+    return jsonResponse({ error: "JSON invalido." }, { status: 400 });
+  }
+
+  const relativePath = String(payload?.path || payload?.relative_path || "").trim();
+  if (!relativePath) {
+    return jsonResponse({ error: "O campo path e obrigatorio." }, { status: 400 });
+  }
+
+  const context = await loadActiveFileAccessContext(env);
+  if (context.errorResponse) {
+    return context.errorResponse;
+  }
+
+  const sourceUrl = buildActiveFileEndpointUrl(context.baseUrl, routeConfig.deletePath);
+  try {
+    const upstreamResponse = await fetch(sourceUrl, {
+      method: "POST",
+      headers: {
+        accept: "application/json, text/plain;q=0.9, */*;q=0.8",
+        "content-type": "application/json; charset=utf-8",
+        "cache-control": "no-store",
+      },
+      body: JSON.stringify({ path: relativePath }),
+    });
+    const upstreamPayload = await readUpstreamPayload(upstreamResponse);
+    if (!upstreamResponse.ok) {
+      return jsonResponse(
+        {
+          error: `Falha ao deletar ${routeConfig.label} do endpoint ativo.`,
+          sourceUrl,
+          upstreamStatus: upstreamResponse.status,
+          upstreamBody: extractUpstreamError(upstreamPayload),
+        },
+        { status: 502 }
+      );
+    }
+
+    return jsonResponse({
+      ok: true,
+      kind: fileKind,
+      endpointId: context.active.id,
+      endpointName: context.active.name,
+      deletedPath: relativePath,
+      sourceUrl,
+      upstream: typeof upstreamPayload === "string" ? { message: upstreamPayload } : upstreamPayload,
+    });
+  } catch (error) {
+    return jsonResponse(
+      {
+        error: `Falha ao deletar ${routeConfig.label} do endpoint ativo.`,
+        sourceUrl,
+        detail: error instanceof Error ? error.message : "Erro inesperado.",
+      },
+      { status: 502 }
+    );
+  }
+}
+
+async function loadActiveFileAccessContext(env) {
+  const [config, registryByEndpointId] = await Promise.all([loadConfig(env), loadRegistry(env)]);
+  const active = getActiveEndpoint(config);
+  if (!active) {
+    return {
+      errorResponse: jsonResponse({ error: "Nenhum endpoint ativo configurado." }, { status: 503 }),
+    };
+  }
+
+  const registry = registryByEndpointId[active.id] || null;
+  const baseUrl = normalizeActiveEndpointBaseUrl(active.url || registry?.publicBaseUrl);
+  if (!baseUrl) {
+    return {
+      errorResponse: jsonResponse(
+        { error: "Endpoint ativo sem URL base valida para consultar arquivos." },
+        { status: 400 }
+      ),
+    };
+  }
+
+  return {
+    active,
+    registry,
+    baseUrl,
+  };
+}
+
+function buildActiveFileEndpointUrl(baseUrl, routePath) {
+  const resolved = resolveUrlAgainstBase(routePath, baseUrl);
+  if (!resolved) {
+    throw new Error(`Nao foi possivel resolver a rota ${routePath}.`);
+  }
+  return resolved;
+}
+
+async function readUpstreamPayload(response) {
+  const contentType = response.headers.get("content-type") || "";
+  return contentType.includes("application/json") ? response.json() : response.text();
+}
+
+function extractUpstreamError(payload) {
+  if (typeof payload === "string") {
+    return payload.slice(0, 500);
+  }
+  if (payload && typeof payload === "object") {
+    return payload.error || payload.message || JSON.stringify(payload);
+  }
+  return "Erro upstream sem detalhes.";
+}
+
+function normalizeActiveFileListPayload(payload) {
+  const rawItems = Array.isArray(payload)
+    ? payload
+    : Array.isArray(payload?.items)
+      ? payload.items
+      : null;
+  if (!rawItems) {
+    throw new Error("Payload de arquivos invalido: items ausente.");
+  }
+  return rawItems
+    .map(normalizeActiveFileItem)
+    .filter(Boolean)
+    .sort(compareActiveFileItems);
+}
+
+function normalizeActiveFileItem(raw) {
+  const relativePath =
+    normalizeOptionalText(raw?.relative_path) ||
+    normalizeOptionalText(raw?.relativePath) ||
+    normalizeOptionalText(raw?.path);
+  const name =
+    normalizeOptionalText(raw?.name) ||
+    normalizeOptionalText(raw?.filename) ||
+    (relativePath ? relativePath.split("/").filter(Boolean).at(-1) || relativePath : null);
+  if (!relativePath || !name) {
+    return null;
+  }
+
+  return {
+    name,
+    relativePath,
+    sizeBytes:
+      normalizeOptionalInteger(raw?.size_bytes) ||
+      normalizeOptionalInteger(raw?.sizeBytes) ||
+      0,
+    modifiedAtUtc:
+      normalizeOptionalTimestamp(raw?.modified_at_utc) ||
+      normalizeOptionalTimestamp(raw?.modifiedAtUtc) ||
+      null,
+  };
+}
+
+function compareActiveFileItems(left, right) {
+  const leftModified = left?.modifiedAtUtc || "";
+  const rightModified = right?.modifiedAtUtc || "";
+  const timestampOrder = String(rightModified).localeCompare(String(leftModified));
+  if (timestampOrder !== 0) {
+    return timestampOrder;
+  }
+  return String(left?.name || "").localeCompare(String(right?.name || ""), "pt-BR", {
+    sensitivity: "base",
   });
 }
 
