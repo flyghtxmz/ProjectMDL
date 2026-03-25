@@ -247,6 +247,7 @@ async function bootstrapSession() {
       return;
     }
     renderAuth();
+    setLoginStatus(buildLoginReadinessMessage(session));
   } catch (error) {
     state.auth.ready = true;
     state.auth.authenticated = false;
@@ -254,6 +255,16 @@ async function bootstrapSession() {
     renderAuth();
     setLoginStatus(error.message, true);
   }
+}
+
+function buildLoginReadinessMessage(session) {
+  if (!session?.authConfigured) {
+    return "Falta configurar DASHBOARD_SESSION_SECRET no Worker.";
+  }
+  if (!session?.bootstrapAdminConfigured && !session?.hasStoredUsers) {
+    return "Nenhum acesso configurado. Defina DASHBOARD_ADMIN_USERNAME e DASHBOARD_ADMIN_PASSWORD no Worker.";
+  }
+  return "Entre com suas credenciais para acessar os endpoints.";
 }
 
 function renderAuth() {
@@ -264,23 +275,22 @@ function renderAuth() {
   elements.logoutButton.hidden = !isAuthenticated;
   elements.loginSubmitButton.disabled = state.auth.loggingIn;
   elements.loginSubmitButton.textContent = state.auth.loggingIn ? "Entrando..." : "Entrar";
-  if (!isAuthenticated) {
-    elements.loginPassword.value = "";
-  }
 }
 
 async function login() {
   if (state.auth.loggingIn) {
     return;
   }
+  const loginValue = elements.loginUsername.value.trim();
+  const passwordValue = elements.loginPassword.value;
   state.auth.loggingIn = true;
   renderAuth();
   try {
     const payload = await api("/api/auth/login", {
       method: "POST",
       body: {
-        login: elements.loginUsername.value.trim(),
-        password: elements.loginPassword.value,
+        login: loginValue,
+        password: passwordValue,
       },
       allowUnauthorized: true,
     });
@@ -288,6 +298,7 @@ async function login() {
     state.auth.user = payload.user || null;
     state.auth.ready = true;
     state.viewMode = state.auth.user?.role === "admin" ? "admin" : "user";
+    elements.loginPassword.value = "";
     setLoginStatus(`Bem-vindo, ${state.auth.user?.name || "usuario"}.`);
     renderAuth();
     await refreshConfig({ showStatus: false, force: true });
@@ -332,6 +343,7 @@ async function logout() {
     recentEndpoints: [],
   };
   resetActiveFilesState();
+  elements.loginPassword.value = "";
   setLoginStatus("Sessao encerrada.");
   renderAuth();
 }

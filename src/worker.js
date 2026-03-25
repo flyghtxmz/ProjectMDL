@@ -426,10 +426,15 @@ export default {
 
 async function handleAuthSession(request, env) {
   const user = await getDashboardSessionUser(request, env);
+  const storedUsers = await loadUsers(env);
+  const activeStoredUsers = storedUsers.filter((candidate) => candidate.isActive !== false);
   return jsonResponse({
     ok: true,
     authenticated: Boolean(user),
     user: sanitizeSessionUser(user),
+    authConfigured: Boolean(String(env?.DASHBOARD_SESSION_SECRET || "").trim()),
+    bootstrapAdminConfigured: Boolean(getBootstrapAdminDefinition(env)),
+    hasStoredUsers: activeStoredUsers.length > 0,
   });
 }
 
@@ -452,6 +457,15 @@ async function handleAuthLogin(request, env) {
   const password = String(payload?.password || "");
   if (!login || !password) {
     return jsonResponse({ error: "Login e senha sao obrigatorios." }, { status: 400 });
+  }
+
+  const bootstrapAdmin = getBootstrapAdminDefinition(env);
+  const storedUsers = await loadUsers(env);
+  if (!bootstrapAdmin && !storedUsers.some((candidate) => candidate.isActive !== false)) {
+    return jsonResponse(
+      { error: "Nenhum acesso configurado no painel. Defina o admin bootstrap no Worker." },
+      { status: 503 }
+    );
   }
 
   const user = await authenticateDashboardCredentials(env, login, password);
