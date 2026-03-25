@@ -1,4 +1,10 @@
 const state = {
+  auth: {
+    ready: false,
+    authenticated: false,
+    user: null,
+    loggingIn: false,
+  },
   viewMode: "admin",
   adminTab: "overview",
   previewUserId: "",
@@ -55,6 +61,15 @@ const state = {
 };
 
 const elements = {
+  authPanel: document.getElementById("auth-panel"),
+  dashboardShell: document.getElementById("dashboard-shell"),
+  loginForm: document.getElementById("login-form"),
+  loginUsername: document.getElementById("login-username"),
+  loginPassword: document.getElementById("login-password"),
+  loginSubmitButton: document.getElementById("login-submit-button"),
+  loginStatusBox: document.getElementById("login-status-box"),
+  logoutButton: document.getElementById("logout-button"),
+  sessionUserName: document.getElementById("session-user-name"),
   adminModeButton: document.getElementById("admin-mode-button"),
   userModeButton: document.getElementById("user-mode-button"),
   previewUserSelect: document.getElementById("preview-user-select"),
@@ -90,7 +105,9 @@ const elements = {
   userForm: document.getElementById("user-form"),
   userId: document.getElementById("user-id"),
   userName: document.getElementById("user-name"),
+  userUsername: document.getElementById("user-username"),
   userEmail: document.getElementById("user-email"),
+  userPassword: document.getElementById("user-password"),
   userNotes: document.getElementById("user-notes"),
   cancelUserEditButton: document.getElementById("cancel-user-edit-button"),
   userFormMode: document.getElementById("user-form-mode"),
@@ -112,10 +129,19 @@ boot();
 
 function boot() {
   bindEvents();
-  refreshConfig({ showStatus: false });
+  bootstrapSession();
 }
 
 function bindEvents() {
+  elements.loginForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    await login();
+  });
+
+  elements.logoutButton.addEventListener("click", async () => {
+    await logout();
+  });
+
   for (const button of elements.adminTabButtons) {
     button.addEventListener("click", () => {
       const nextTab = button.dataset.adminTabTarget || "overview";
@@ -202,6 +228,117 @@ function bindEvents() {
     state.catalogFilters.category = event.currentTarget.value;
     renderCatalog();
   });
+}
+
+async function bootstrapSession() {
+  try {
+    const session = await api("/api/auth/session", { allowUnauthorized: true });
+    state.auth.ready = true;
+    state.auth.authenticated = Boolean(session.authenticated);
+    state.auth.user = session.user || null;
+    if (state.auth.authenticated) {
+      if (state.auth.user?.role === "admin") {
+        state.viewMode = "admin";
+      } else {
+        state.viewMode = "user";
+      }
+      renderAuth();
+      await refreshConfig({ showStatus: false, force: true });
+      return;
+    }
+    renderAuth();
+  } catch (error) {
+    state.auth.ready = true;
+    state.auth.authenticated = false;
+    state.auth.user = null;
+    renderAuth();
+    setLoginStatus(error.message, true);
+  }
+}
+
+function renderAuth() {
+  const isAuthenticated = state.auth.authenticated;
+  elements.authPanel.hidden = isAuthenticated;
+  elements.dashboardShell.hidden = !isAuthenticated;
+  elements.sessionUserName.textContent = state.auth.user?.name || "nao autenticado";
+  elements.logoutButton.hidden = !isAuthenticated;
+  elements.loginSubmitButton.disabled = state.auth.loggingIn;
+  elements.loginSubmitButton.textContent = state.auth.loggingIn ? "Entrando..." : "Entrar";
+  if (!isAuthenticated) {
+    elements.loginPassword.value = "";
+  }
+}
+
+async function login() {
+  if (state.auth.loggingIn) {
+    return;
+  }
+  state.auth.loggingIn = true;
+  renderAuth();
+  try {
+    const payload = await api("/api/auth/login", {
+      method: "POST",
+      body: {
+        login: elements.loginUsername.value.trim(),
+        password: elements.loginPassword.value,
+      },
+      allowUnauthorized: true,
+    });
+    state.auth.authenticated = Boolean(payload.authenticated);
+    state.auth.user = payload.user || null;
+    state.auth.ready = true;
+    state.viewMode = state.auth.user?.role === "admin" ? "admin" : "user";
+    setLoginStatus(`Bem-vindo, ${state.auth.user?.name || "usuario"}.`);
+    renderAuth();
+    await refreshConfig({ showStatus: false, force: true });
+  } catch (error) {
+    state.auth.authenticated = false;
+    state.auth.user = null;
+    setLoginStatus(error.message, true);
+    renderAuth();
+  } finally {
+    state.auth.loggingIn = false;
+    renderAuth();
+  }
+}
+
+async function logout() {
+  try {
+    await api("/api/auth/logout", {
+      method: "POST",
+      allowUnauthorized: true,
+    });
+  } catch {
+    // ignore
+  }
+  state.auth.authenticated = false;
+  state.auth.user = null;
+  state.users = [];
+  state.previewUserId = "";
+  state.config = {
+    endpoints: [],
+    activeEndpointId: null,
+    activeEndpoint: null,
+    updatedAt: null,
+    registryByEndpointId: {},
+    registryCount: 0,
+  };
+  state.endpointStatusesById = {};
+  state.catalog = {
+    entries: [],
+    totalEntries: 0,
+    lastUpdated: null,
+    recentSyncs: [],
+    recentEndpoints: [],
+  };
+  resetActiveFilesState();
+  setLoginStatus("Sessao encerrada.");
+  renderAuth();
+}
+
+function setLoginStatus(message, isError = false) {
+  elements.loginStatusBox.textContent = message;
+  elements.loginStatusBox.style.color = isError ? "#ffbec3" : "";
 }
 
 async function refreshConfig(options = {}) {
@@ -331,7 +468,11 @@ function render() {
 }
 
 function renderViewMode() {
-  const isAdmin = state.viewMode === "admin";
+  const isAdminUser = state.auth.user?.role === "admin";
+  const isAdmin = isAdminUser && state.viewMode === "admin";
+  elements.adminModeButton.hidden = !isAdminUser;
+  elements.userModeButton.hidden = !isAdminUser;
+  elements.previewUserSelect.closest(".preview-user-field").hidden = !isAdminUser;
   elements.adminModeButton.classList.toggle("is-active", isAdmin);
   elements.userModeButton.classList.toggle("is-active", !isAdmin);
   for (const section of elements.adminOnlySections) {
@@ -408,7 +549,9 @@ function renderUsers() {
   for (const user of state.users) {
     const fragment = elements.userTemplate.content.cloneNode(true);
     fragment.querySelector(".user-name").textContent = user.name;
-    fragment.querySelector(".user-email").textContent = user.email || "Sem email";
+    fragment.querySelector(".user-email").textContent = user.username
+      ? `${user.username}${user.email ? ` | ${user.email}` : ""}`
+      : user.email || "Sem email";
     fragment.querySelector(".user-notes").textContent = user.notes || "Sem notas.";
     fragment.querySelector(".preview-user-button").addEventListener("click", () => {
       state.previewUserId = user.id;
@@ -537,10 +680,17 @@ function buildUserModeSummary() {
 }
 
 function getPreviewUser() {
-  return state.users.find((user) => user.id === state.previewUserId) || null;
+  const targetUserId =
+    state.auth.user?.role === "admin" ? state.previewUserId : state.auth.user?.id || state.previewUserId;
+  return state.users.find((user) => user.id === targetUserId) || null;
 }
 
 function setViewMode(mode) {
+  if (state.auth.user?.role !== "admin") {
+    state.viewMode = "user";
+    render();
+    return;
+  }
   state.viewMode = mode === "user" ? "user" : "admin";
   if (state.viewMode === "user") {
     syncPreviewUserSelection();
@@ -1652,7 +1802,9 @@ async function saveUser() {
     body: {
       id: elements.userId.value.trim() || undefined,
       name: elements.userName.value.trim(),
+      username: elements.userUsername.value.trim(),
       email: elements.userEmail.value.trim(),
+      password: elements.userPassword.value,
       notes: elements.userNotes.value.trim(),
       role: "user",
     },
@@ -1665,7 +1817,9 @@ async function saveUser() {
 function populateUserForm(user) {
   elements.userId.value = user.id;
   elements.userName.value = user.name;
+  elements.userUsername.value = user.username || "";
   elements.userEmail.value = user.email || "";
+  elements.userPassword.value = "";
   elements.userNotes.value = user.notes || "";
   elements.userFormMode.textContent = "edicao";
 }
@@ -1673,6 +1827,7 @@ function populateUserForm(user) {
 function resetUserForm() {
   elements.userForm.reset();
   elements.userId.value = "";
+  elements.userPassword.value = "";
   elements.userFormMode.textContent = "novo";
 }
 
@@ -1743,6 +1898,12 @@ async function api(path, options = {}) {
     : await response.text();
 
   if (!response.ok) {
+    if (response.status === 401 && !options.allowUnauthorized) {
+      state.auth.authenticated = false;
+      state.auth.user = null;
+      renderAuth();
+      setLoginStatus("Sua sessao expirou. Faça login novamente.", true);
+    }
     throw new Error(typeof payload === "string" ? payload : payload.error || "Erro inesperado.");
   }
 

@@ -39,6 +39,8 @@ const DASHBOARD_PATH_PREFIX = "/dashboard";
 const PROXY_SLUG_PREFIX = "cmfy_";
 const MAX_RECENT_CATALOG_SYNCS = 12;
 const MAX_RECENT_JOBS = 40;
+const SESSION_COOKIE_NAME = "projectmdl_session";
+const SESSION_TTL_SECONDS = 60 * 60 * 12;
 
 const DEFAULT_CONFIG = {
   endpoints: [],
@@ -70,16 +72,41 @@ export default {
       return new Response(null, { status: 204, headers: corsHeaders });
     }
 
+    if (url.pathname === "/api/auth/session") {
+      if (request.method !== "GET") {
+        return withCors(methodNotAllowed(["GET"]));
+      }
+      return withCors(await handleAuthSession(request, env));
+    }
+
+    if (url.pathname === "/api/auth/login") {
+      if (request.method !== "POST") {
+        return withCors(methodNotAllowed(["POST"]));
+      }
+      return withCors(await handleAuthLogin(request, env));
+    }
+
+    if (url.pathname === "/api/auth/logout") {
+      if (request.method !== "POST") {
+        return withCors(methodNotAllowed(["POST"]));
+      }
+      return withCors(await handleAuthLogout(request, env));
+    }
+
     if (url.pathname === "/api/health") {
       return withCors(jsonResponse(await buildHealthPayload(env)));
     }
 
     if (url.pathname === "/api/config") {
       if (request.method === "GET") {
-        return withCors(jsonResponse(await buildConfigPayload(env)));
+        const session = await requireAuthenticatedDashboardUser(request, env);
+        if (session.response) {
+          return withCors(session.response);
+        }
+        return withCors(jsonResponse(await buildConfigPayload(env, null, session.user)));
       }
       if (request.method === "PUT") {
-        const denied = requireAdmin(request, env);
+        const denied = await requireAdminDashboardUser(request, env);
         if (denied) {
           return withCors(denied);
         }
@@ -90,9 +117,17 @@ export default {
 
     if (url.pathname === "/api/control/config") {
       if (request.method === "GET") {
+        const denied = await requireAdminDashboardUser(request, env);
+        if (denied) {
+          return withCors(denied);
+        }
         return withCors(jsonResponse(await loadControlConfig(env)));
       }
       if (request.method === "PUT") {
+        const denied = await requireAdminDashboardUser(request, env);
+        if (denied) {
+          return withCors(denied);
+        }
         return withCors(await handleControlConfigWrite(request, env));
       }
       return withCors(methodNotAllowed(["GET", "PUT"]));
@@ -100,9 +135,17 @@ export default {
 
     if (url.pathname === "/api/modal-accounts") {
       if (request.method === "GET") {
+        const denied = await requireAdminDashboardUser(request, env);
+        if (denied) {
+          return withCors(denied);
+        }
         return withCors(jsonResponse(await buildModalAccountsPayload(env)));
       }
       if (request.method === "POST") {
+        const denied = await requireAdminDashboardUser(request, env);
+        if (denied) {
+          return withCors(denied);
+        }
         return withCors(await handleModalAccountWrite(request, env));
       }
       return withCors(methodNotAllowed(["GET", "POST"]));
@@ -110,9 +153,17 @@ export default {
 
     if (url.pathname === "/api/users") {
       if (request.method === "GET") {
-        return withCors(jsonResponse(await buildUsersPayload(env)));
+        const session = await requireAuthenticatedDashboardUser(request, env);
+        if (session.response) {
+          return withCors(session.response);
+        }
+        return withCors(jsonResponse(await buildUsersPayload(env, session.user)));
       }
       if (request.method === "POST") {
+        const denied = await requireAdminDashboardUser(request, env);
+        if (denied) {
+          return withCors(denied);
+        }
         return withCors(await handleUserWrite(request, env));
       }
       return withCors(methodNotAllowed(["GET", "POST"]));
@@ -122,6 +173,10 @@ export default {
       if (request.method !== "DELETE") {
         return withCors(methodNotAllowed(["DELETE"]));
       }
+      const denied = await requireAdminDashboardUser(request, env);
+      if (denied) {
+        return withCors(denied);
+      }
       return withCors(await handleUserDelete(url.pathname, env));
     }
 
@@ -129,15 +184,27 @@ export default {
       if (request.method !== "DELETE") {
         return withCors(methodNotAllowed(["DELETE"]));
       }
+      const denied = await requireAdminDashboardUser(request, env);
+      if (denied) {
+        return withCors(denied);
+      }
       return withCors(await handleModalAccountDelete(url.pathname, env));
     }
 
     if (url.pathname === "/api/jobs") {
       if (request.method === "GET") {
+        const denied = await requireAdminDashboardUser(request, env);
+        if (denied) {
+          return withCors(denied);
+        }
         return withCors(jsonResponse(await buildJobsPayload(env)));
       }
       if (request.method === "POST") {
-        return withCors(await handleJobDispatch(request, env));
+        const session = await requireAuthenticatedDashboardUser(request, env);
+        if (session.response) {
+          return withCors(session.response);
+        }
+        return withCors(await handleJobDispatch(request, env, session.user));
       }
       return withCors(methodNotAllowed(["GET", "POST"]));
     }
@@ -145,6 +212,10 @@ export default {
     if (url.pathname === "/api/catalog") {
       let response;
       if (request.method === "GET") {
+        const session = await requireAuthenticatedDashboardUser(request, env);
+        if (session.response) {
+          return withCors(session.response);
+        }
         response = withCors(
           jsonResponse(await buildCatalogPayload(env), {
             headers: {
@@ -156,6 +227,10 @@ export default {
         return response;
       }
       if (request.method === "PUT") {
+        const denied = await requireAdminDashboardUser(request, env);
+        if (denied) {
+          return withCors(denied);
+        }
         response = withCors(await handleCatalogSave(request, env));
         logApiRequest(request, url, response);
         return response;
@@ -190,7 +265,11 @@ export default {
         logApiRequest(request, url, response);
         return response;
       }
-      response = withCors(await handleActiveCatalogSave(env));
+      const session = await requireAuthenticatedDashboardUser(request, env);
+      if (session.response) {
+        return withCors(session.response);
+      }
+      response = withCors(await handleActiveCatalogSave(env, session.user));
       logApiRequest(request, url, response);
       return response;
     }
@@ -219,7 +298,11 @@ export default {
           logApiRequest(request, url, response);
           return response;
         }
-        response = withCors(await handleActiveFilesList(env, fileKind));
+        const session = await requireAuthenticatedDashboardUser(request, env);
+        if (session.response) {
+          return withCors(session.response);
+        }
+        response = withCors(await handleActiveFilesList(env, fileKind, session.user));
         logApiRequest(request, url, response);
         return response;
       }
@@ -229,7 +312,11 @@ export default {
           logApiRequest(request, url, response);
           return response;
         }
-        response = withCors(await handleActiveFilesDownload(request, env, fileKind));
+        const session = await requireAuthenticatedDashboardUser(request, env);
+        if (session.response) {
+          return withCors(session.response);
+        }
+        response = withCors(await handleActiveFilesDownload(request, env, fileKind, session.user));
         logApiRequest(request, url, response);
         return response;
       }
@@ -239,7 +326,11 @@ export default {
           logApiRequest(request, url, response);
           return response;
         }
-        response = withCors(await handleActiveFilesDelete(request, env, fileKind));
+        const session = await requireAuthenticatedDashboardUser(request, env);
+        if (session.response) {
+          return withCors(session.response);
+        }
+        response = withCors(await handleActiveFilesDelete(request, env, fileKind, session.user));
         logApiRequest(request, url, response);
         return response;
       }
@@ -249,14 +340,22 @@ export default {
       if (request.method !== "GET") {
         return withCors(methodNotAllowed(["GET"]));
       }
-      return withCors(jsonResponse(await buildEndpointStatusesPayload(env)));
+      const session = await requireAuthenticatedDashboardUser(request, env);
+      if (session.response) {
+        return withCors(session.response);
+      }
+      return withCors(jsonResponse(await buildEndpointStatusesPayload(env, session.user)));
     }
 
     if (url.pathname.startsWith("/api/endpoints/") && url.pathname.endsWith("/status")) {
       if (request.method !== "GET") {
         return withCors(methodNotAllowed(["GET"]));
       }
-      return withCors(await handleSingleEndpointStatus(url.pathname, env));
+      const session = await requireAuthenticatedDashboardUser(request, env);
+      if (session.response) {
+        return withCors(session.response);
+      }
+      return withCors(await handleSingleEndpointStatus(url.pathname, env, session.user));
     }
 
     if (url.pathname === "/api/modal-registry/report") {
@@ -274,7 +373,7 @@ export default {
       if (request.method !== "POST") {
         return withCors(methodNotAllowed(["POST"]));
       }
-      const denied = requireAdmin(request, env);
+      const denied = await requireAdminDashboardUser(request, env);
       if (denied) {
         return withCors(denied);
       }
@@ -282,8 +381,12 @@ export default {
     }
 
     if (url.pathname === "/api/proxy-info") {
+      const session = await requireAuthenticatedDashboardUser(request, env);
+      if (session.response) {
+        return withCors(session.response);
+      }
       const config = await loadConfig(env);
-      const active = getActiveEndpoint(config);
+      const active = getAuthorizedActiveEndpoint(config, session.user);
       return withCors(
         jsonResponse({
           activeEndpoint: active,
@@ -293,6 +396,10 @@ export default {
     }
 
     if (url.pathname === "/modal" || url.pathname.startsWith("/modal/")) {
+      const denied = await requireAdminDashboardUser(request, env);
+      if (denied) {
+        return withCors(denied);
+      }
       return withCors(await proxyToActiveEndpoint(request, env, url));
     }
 
@@ -306,12 +413,312 @@ export default {
 
     const aliasMatch = matchEndpointAliasPath(url.pathname);
     if (aliasMatch) {
-      return proxyToEndpointAlias(request, env, url, aliasMatch);
+      const session = await requireAuthenticatedDashboardUser(request, env);
+      if (session.response) {
+        return withCors(session.response);
+      }
+      return proxyToEndpointAlias(request, env, url, aliasMatch, session.user);
     }
 
     return env.ASSETS.fetch(request);
   },
 };
+
+async function handleAuthSession(request, env) {
+  const user = await getDashboardSessionUser(request, env);
+  return jsonResponse({
+    ok: true,
+    authenticated: Boolean(user),
+    user: sanitizeSessionUser(user),
+  });
+}
+
+async function handleAuthLogin(request, env) {
+  if (!String(env?.DASHBOARD_SESSION_SECRET || "").trim()) {
+    return jsonResponse(
+      { error: "DASHBOARD_SESSION_SECRET nao configurado." },
+      { status: 503 }
+    );
+  }
+
+  let payload;
+  try {
+    payload = await request.json();
+  } catch {
+    return jsonResponse({ error: "JSON invalido." }, { status: 400 });
+  }
+
+  const login = String(payload?.login || payload?.username || payload?.email || "").trim();
+  const password = String(payload?.password || "");
+  if (!login || !password) {
+    return jsonResponse({ error: "Login e senha sao obrigatorios." }, { status: 400 });
+  }
+
+  const user = await authenticateDashboardCredentials(env, login, password);
+  if (!user) {
+    return jsonResponse({ error: "Credenciais invalidas." }, { status: 401 });
+  }
+
+  const sessionToken = await createDashboardSessionToken(user, env);
+  const response = jsonResponse({
+    ok: true,
+    authenticated: true,
+    user: sanitizeSessionUser(user),
+  });
+  appendSetCookie(
+    response.headers,
+    buildSessionCookie(sessionToken, {
+      maxAge: SESSION_TTL_SECONDS,
+    })
+  );
+  return response;
+}
+
+async function handleAuthLogout(request, env) {
+  const response = jsonResponse({ ok: true });
+  appendSetCookie(response.headers, buildSessionCookie("", { maxAge: 0 }));
+  return response;
+}
+
+async function requireAuthenticatedDashboardUser(request, env) {
+  const user = await getDashboardSessionUser(request, env);
+  if (user) {
+    return { user, response: null };
+  }
+  return {
+    user: null,
+    response: jsonResponse({ error: "Nao autenticado." }, { status: 401 }),
+  };
+}
+
+async function requireAdminDashboardUser(request, env) {
+  const session = await requireAuthenticatedDashboardUser(request, env);
+  if (session.response) {
+    return session.response;
+  }
+  if (session.user.role === "admin") {
+    return null;
+  }
+  return jsonResponse({ error: "Acesso restrito ao administrador." }, { status: 403 });
+}
+
+async function getDashboardSessionUser(request, env) {
+  const sessionSecret = String(env?.DASHBOARD_SESSION_SECRET || "").trim();
+  if (!sessionSecret) {
+    return null;
+  }
+  const cookies = parseCookies(request.headers.get("cookie") || "");
+  const token = cookies[SESSION_COOKIE_NAME];
+  if (!token) {
+    return null;
+  }
+  const sessionPayload = await verifyDashboardSessionToken(token, env);
+  if (!sessionPayload) {
+    return null;
+  }
+  return loadDashboardUserById(env, sessionPayload.userId, sessionPayload.role);
+}
+
+async function authenticateDashboardCredentials(env, login, password) {
+  const bootstrapAdmin = getBootstrapAdminDefinition(env);
+  if (
+    bootstrapAdmin &&
+    equalsLoginIdentity(bootstrapAdmin.username, login) &&
+    password === bootstrapAdmin.password
+  ) {
+    return bootstrapAdmin;
+  }
+
+  const users = await loadUsers(env);
+  for (const user of users) {
+    if (!user.isActive) {
+      continue;
+    }
+    const identities = [user.username, user.email].filter(Boolean);
+    if (!identities.some((candidate) => equalsLoginIdentity(candidate, login))) {
+      continue;
+    }
+    if (await verifyPassword(password, user)) {
+      return user;
+    }
+  }
+  return null;
+}
+
+async function loadDashboardUserById(env, userId, role = null) {
+  const bootstrapAdmin = getBootstrapAdminDefinition(env);
+  if (role === "admin" && bootstrapAdmin && userId === bootstrapAdmin.id) {
+    return bootstrapAdmin;
+  }
+  const users = await loadUsers(env);
+  return users.find((user) => user.id === userId && user.isActive) || null;
+}
+
+function getBootstrapAdminDefinition(env) {
+  const username = normalizeOptionalText(env?.DASHBOARD_ADMIN_USERNAME);
+  const password = String(env?.DASHBOARD_ADMIN_PASSWORD || "").trim();
+  if (!username || !password) {
+    return null;
+  }
+  return {
+    id: "bootstrap-admin",
+    name: normalizeOptionalText(env?.DASHBOARD_ADMIN_NAME) || "Administrador",
+    username,
+    password,
+    email: null,
+    notes: "Administrador bootstrap via environment.",
+    role: "admin",
+    isActive: true,
+    createdAt: null,
+    updatedAt: null,
+  };
+}
+
+function equalsLoginIdentity(left, right) {
+  return String(left || "").trim().toLowerCase() === String(right || "").trim().toLowerCase();
+}
+
+function sanitizeSessionUser(user) {
+  if (!user) {
+    return null;
+  }
+  return {
+    id: user.id,
+    name: user.name,
+    username: user.username || null,
+    email: user.email || null,
+    role: user.role,
+  };
+}
+
+async function createDashboardSessionToken(user, env) {
+  const payload = {
+    userId: user.id,
+    role: user.role,
+    exp: Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS,
+  };
+  const encodedPayload = encodeBase64Url(JSON.stringify(payload));
+  const signature = await signSessionValue(encodedPayload, env);
+  return `${encodedPayload}.${signature}`;
+}
+
+async function verifyDashboardSessionToken(token, env) {
+  const [encodedPayload, signature] = String(token || "").split(".");
+  if (!encodedPayload || !signature) {
+    return null;
+  }
+  const expectedSignature = await signSessionValue(encodedPayload, env);
+  if (!timingSafeEqual(signature, expectedSignature)) {
+    return null;
+  }
+  try {
+    const payload = JSON.parse(decodeBase64Url(encodedPayload));
+    if (!payload?.userId || !payload?.role || !payload?.exp) {
+      return null;
+    }
+    if (Number(payload.exp) * 1000 <= Date.now()) {
+      return null;
+    }
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+async function signSessionValue(value, env) {
+  const secret = String(env?.DASHBOARD_SESSION_SECRET || "").trim();
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(String(value)));
+  return encodeBase64Url(new Uint8Array(signature));
+}
+
+function buildSessionCookie(token, options = {}) {
+  const parts = [`${SESSION_COOKIE_NAME}=${token}`];
+  parts.push("Path=/");
+  parts.push("HttpOnly");
+  parts.push("SameSite=Lax");
+  parts.push("Secure");
+  parts.push(`Max-Age=${Math.max(0, Number(options.maxAge || 0))}`);
+  return parts.join("; ");
+}
+
+function appendSetCookie(headers, cookieValue) {
+  headers.append("set-cookie", cookieValue);
+}
+
+function parseCookies(rawCookieHeader) {
+  return String(rawCookieHeader || "")
+    .split(";")
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .reduce((accumulator, item) => {
+      const separatorIndex = item.indexOf("=");
+      if (separatorIndex === -1) {
+        return accumulator;
+      }
+      const key = item.slice(0, separatorIndex).trim();
+      const value = item.slice(separatorIndex + 1).trim();
+      accumulator[key] = value;
+      return accumulator;
+    }, {});
+}
+
+function encodeBase64Url(value) {
+  const binary =
+    value instanceof Uint8Array
+      ? Array.from(value, (byte) => String.fromCharCode(byte)).join("")
+      : String(value || "");
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function decodeBase64Url(value) {
+  const normalized = String(value || "").replace(/-/g, "+").replace(/_/g, "/");
+  const padded = normalized + "=".repeat((4 - (normalized.length % 4 || 4)) % 4);
+  return atob(padded);
+}
+
+function decodeBase64UrlToBytes(value) {
+  const binary = decodeBase64Url(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes;
+}
+
+function filterEndpointsForUser(endpoints, user) {
+  if (!user || user.role === "admin") {
+    return endpoints;
+  }
+  return endpoints.filter((endpoint) => endpoint.assignedUserId === user.id);
+}
+
+function getAuthorizedActiveEndpoint(config, user) {
+  const visibleEndpoints = filterEndpointsForUser(config.endpoints, user);
+  if (!visibleEndpoints.length) {
+    return null;
+  }
+  const preferred = visibleEndpoints.find(
+    (endpoint) => endpoint.id === config.activeEndpointId && endpoint.enabled
+  );
+  return preferred || visibleEndpoints.find((endpoint) => endpoint.enabled) || visibleEndpoints[0] || null;
+}
+
+function canUserAccessEndpoint(endpoint, user) {
+  if (!endpoint) {
+    return false;
+  }
+  if (!user || user.role === "admin") {
+    return true;
+  }
+  return endpoint.assignedUserId === user.id;
+}
 
 async function buildHealthPayload(env) {
   const [config, registryByEndpointId, catalogMeta] = await Promise.all([
@@ -330,12 +737,21 @@ async function buildHealthPayload(env) {
   };
 }
 
-async function buildConfigPayload(env, config = null) {
+async function buildConfigPayload(env, config = null, currentUser = null) {
   const resolvedConfig = config || (await loadConfig(env));
   const registryByEndpointId = await loadRegistry(env);
+  const visibleEndpoints = filterEndpointsForUser(resolvedConfig.endpoints, currentUser);
+  const activeEndpoint = getAuthorizedActiveEndpoint(
+    {
+      ...resolvedConfig,
+      endpoints: visibleEndpoints,
+    },
+    currentUser
+  );
   return {
     ...resolvedConfig,
-    activeEndpoint: getActiveEndpoint(resolvedConfig),
+    endpoints: visibleEndpoints,
+    activeEndpoint,
     registryByEndpointId,
     registryCount: Object.keys(registryByEndpointId).length,
   };
@@ -484,25 +900,32 @@ function modalAccountKvKey(accountKey) {
   return `${MODAL_ACCOUNT_KEY_PREFIX}${accountKey}`;
 }
 
-async function buildUsersPayload(env) {
+async function buildUsersPayload(env, currentUser = null) {
+  const users = await loadUsers(env);
+  const visibleUsers =
+    currentUser?.role === "admin"
+      ? users
+      : currentUser
+        ? users.filter((user) => user.id === currentUser.id)
+        : [];
   return {
     ok: true,
-    users: await loadUsers(env),
+    users: visibleUsers.map(sanitizeStoredUser),
   };
 }
 
 async function loadUsers(env) {
   const raw = await env.MODAL_ROUTER_KV.get(USERS_KEY, "json");
-  const users = Array.isArray(raw) ? raw.map(normalizeUser).filter(Boolean) : [];
+  const users = Array.isArray(raw) ? raw.map(normalizeStoredUser).filter(Boolean) : [];
   return users.sort((left, right) =>
-    String(left.name || left.email || left.id).localeCompare(String(right.name || right.email || right.id), "pt-BR", {
+    String(left.name || left.username || left.email || left.id).localeCompare(String(right.name || right.username || right.email || right.id), "pt-BR", {
       sensitivity: "base",
     })
   );
 }
 
 async function saveUsers(env, users) {
-  const normalizedUsers = users.map(normalizeUser).filter(Boolean);
+  const normalizedUsers = users.map(normalizeStoredUser).filter(Boolean);
   await env.MODAL_ROUTER_KV.put(USERS_KEY, JSON.stringify(normalizedUsers));
   return normalizedUsers;
 }
@@ -515,18 +938,23 @@ async function handleUserWrite(request, env) {
     return jsonResponse({ error: "JSON invalido." }, { status: 400 });
   }
   let nextUser;
+  const users = await loadUsers(env);
+  const existingUser =
+    users.find((user) => user.id === normalizeOptionalText(payload?.id)) || null;
   try {
-    nextUser = normalizeUser(payload, { generateId: true });
+    nextUser = await normalizeUser(payload, {
+      generateId: true,
+      existingUser,
+    });
   } catch (error) {
     return jsonResponse({ error: error.message }, { status: 400 });
   }
-  const users = await loadUsers(env);
   const remaining = users.filter((user) => user.id !== nextUser.id);
   const savedUsers = await saveUsers(env, [...remaining, nextUser]);
   return jsonResponse({
     ok: true,
-    user: nextUser,
-    users: savedUsers,
+    user: sanitizeStoredUser(nextUser),
+    users: savedUsers.map(sanitizeStoredUser),
   });
 }
 
@@ -555,27 +983,55 @@ async function handleUserDelete(pathname, env) {
   return jsonResponse({
     ok: true,
     userId,
-    users: savedUsers,
+    users: savedUsers.map(sanitizeStoredUser),
   });
 }
 
-function normalizeUser(raw, options = {}) {
+async function normalizeUser(raw, options = {}) {
   const id = normalizeOptionalText(raw?.id) || (options.generateId ? crypto.randomUUID() : null);
   const name = normalizeOptionalText(raw?.name);
+  const username = normalizeLoginName(raw?.username || raw?.login);
   const email = normalizeOptionalText(raw?.email);
+  const password = String(raw?.password || "");
+  const existingUser = options.existingUser || null;
   if (!id) {
     throw new Error("Cada usuario precisa de um id.");
   }
   if (!name) {
     throw new Error("Cada usuario precisa de um nome.");
   }
+  if (!username) {
+    throw new Error("Cada usuario precisa de um login.");
+  }
+  let passwordHash = normalizeOptionalText(existingUser?.passwordHash);
+  let passwordSalt = normalizeOptionalText(existingUser?.passwordSalt);
+  let passwordIterations = normalizeOptionalInteger(existingUser?.passwordIterations) || 120000;
+  if (password) {
+    const passwordRecord = await hashPassword(password);
+    passwordHash = passwordRecord.hash;
+    passwordSalt = passwordRecord.salt;
+    passwordIterations = passwordRecord.iterations;
+  } else if (!existingUser) {
+    throw new Error("Cada usuario precisa de uma senha inicial.");
+  }
   return {
     id,
     name,
+    username,
     email,
     notes: normalizeOptionalText(raw?.notes),
     role: normalizeOptionalText(raw?.role) || "user",
+    isActive:
+      raw?.isActive === false || raw?.is_active === false
+        ? false
+        : existingUser?.isActive === false
+          ? false
+          : true,
+    passwordHash,
+    passwordSalt,
+    passwordIterations,
     createdAt:
+      normalizeOptionalTimestamp(existingUser?.createdAt) ||
       normalizeOptionalTimestamp(raw?.createdAt) ||
       normalizeOptionalTimestamp(raw?.created_at) ||
       new Date().toISOString(),
@@ -584,6 +1040,98 @@ function normalizeUser(raw, options = {}) {
       normalizeOptionalTimestamp(raw?.updated_at) ||
       new Date().toISOString(),
   };
+}
+
+function normalizeStoredUser(raw) {
+  const id = normalizeOptionalText(raw?.id);
+  const name = normalizeOptionalText(raw?.name);
+  const username = normalizeLoginName(raw?.username || raw?.login);
+  if (!id || !name || !username) {
+    return null;
+  }
+  return {
+    id,
+    name,
+    username,
+    email: normalizeOptionalText(raw?.email),
+    notes: normalizeOptionalText(raw?.notes),
+    role: normalizeOptionalText(raw?.role) || "user",
+    isActive:
+      raw?.isActive === false || raw?.is_active === false
+        ? false
+        : true,
+    passwordHash: normalizeOptionalText(raw?.passwordHash),
+    passwordSalt: normalizeOptionalText(raw?.passwordSalt),
+    passwordIterations: normalizeOptionalInteger(raw?.passwordIterations) || 120000,
+    createdAt:
+      normalizeOptionalTimestamp(raw?.createdAt) ||
+      normalizeOptionalTimestamp(raw?.created_at),
+    updatedAt:
+      normalizeOptionalTimestamp(raw?.updatedAt) ||
+      normalizeOptionalTimestamp(raw?.updated_at),
+  };
+}
+
+function sanitizeStoredUser(user) {
+  if (!user) {
+    return null;
+  }
+  return {
+    id: user.id,
+    name: user.name,
+    username: user.username || null,
+    email: user.email || null,
+    notes: user.notes || null,
+    role: user.role || "user",
+    isActive: user.isActive !== false,
+    createdAt: user.createdAt || null,
+    updatedAt: user.updatedAt || null,
+  };
+}
+
+function normalizeLoginName(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  return raw || null;
+}
+
+async function hashPassword(password, options = {}) {
+  const saltBytes = options.salt
+    ? decodeBase64UrlToBytes(options.salt)
+    : crypto.getRandomValues(new Uint8Array(16));
+  const iterations = Number(options.iterations || 120000);
+  const baseKey = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(String(password || "")),
+    "PBKDF2",
+    false,
+    ["deriveBits"]
+  );
+  const derivedBits = await crypto.subtle.deriveBits(
+    {
+      name: "PBKDF2",
+      hash: "SHA-256",
+      salt: saltBytes,
+      iterations,
+    },
+    baseKey,
+    256
+  );
+  return {
+    hash: encodeBase64Url(new Uint8Array(derivedBits)),
+    salt: encodeBase64Url(saltBytes),
+    iterations,
+  };
+}
+
+async function verifyPassword(password, user) {
+  if (!user?.passwordHash || !user?.passwordSalt || !user?.passwordIterations) {
+    return false;
+  }
+  const comparison = await hashPassword(password, {
+    salt: user.passwordSalt,
+    iterations: user.passwordIterations,
+  });
+  return timingSafeEqual(comparison.hash, user.passwordHash);
 }
 
 async function buildJobsPayload(env) {
@@ -606,7 +1154,7 @@ async function loadJobs(env) {
     .slice(0, MAX_RECENT_JOBS);
 }
 
-async function handleJobDispatch(request, env) {
+async function handleJobDispatch(request, env, currentUser = null) {
   let payload;
   try {
     payload = await request.json();
@@ -624,6 +1172,15 @@ async function handleJobDispatch(request, env) {
   const endpoint = config.endpoints.find((candidate) => candidate.id === endpointId);
   if (!endpoint) {
     return jsonResponse({ error: "Endpoint nao encontrado." }, { status: 404 });
+  }
+  if (!canUserAccessEndpoint(endpoint, currentUser)) {
+    return jsonResponse({ error: "Sem permissao para este endpoint." }, { status: 403 });
+  }
+  if (currentUser?.role !== "admin" && endpoint.userCanDeploy === false) {
+    return jsonResponse(
+      { error: "Este usuario nao pode disparar deploy/stop para este endpoint." },
+      { status: 403 }
+    );
   }
 
   const controlConfig = await loadControlConfig(env);
@@ -668,9 +1225,11 @@ async function handleJobDispatch(request, env) {
     workflowId,
     entryFile: endpoint.entryFile || "comfyui_modal.py",
     requestedByUserId:
+      currentUser?.id ||
       normalizeOptionalText(payload?.requestedByUserId) ||
       normalizeOptionalText(payload?.requested_by_user_id),
     requestedByUserName:
+      currentUser?.name ||
       normalizeOptionalText(payload?.requestedByUserName) ||
       normalizeOptionalText(payload?.requested_by_user_name),
     createdAt: new Date().toISOString(),
@@ -802,9 +1361,13 @@ async function listKvKeys(env, prefix) {
   return names;
 }
 
-async function buildEndpointStatusesPayload(env) {
+async function buildEndpointStatusesPayload(env, currentUser = null) {
   const [config, registryByEndpointId] = await Promise.all([loadConfig(env), loadRegistry(env)]);
-  const probeTargets = buildEndpointProbeTargets(config, registryByEndpointId);
+  const visibleConfig = {
+    ...config,
+    endpoints: filterEndpointsForUser(config.endpoints, currentUser),
+  };
+  const probeTargets = buildEndpointProbeTargets(visibleConfig, registryByEndpointId);
   const statuses = await Promise.all(probeTargets.map((target) => probeEndpointStatus(target)));
   const statusesByEndpointId = {};
   for (const status of statuses) {
@@ -816,13 +1379,17 @@ async function buildEndpointStatusesPayload(env) {
   };
 }
 
-async function handleSingleEndpointStatus(pathname, env) {
+async function handleSingleEndpointStatus(pathname, env, currentUser = null) {
   const match = pathname.match(/^\/api\/endpoints\/([^/]+)\/status$/);
   const endpointId = match?.[1];
   if (!endpointId) {
     return jsonResponse({ error: "Endpoint invalido." }, { status: 400 });
   }
   const [config, registryByEndpointId] = await Promise.all([loadConfig(env), loadRegistry(env)]);
+  const configuredEndpoint = config.endpoints.find((endpoint) => endpoint.id === endpointId);
+  if (configuredEndpoint && !canUserAccessEndpoint(configuredEndpoint, currentUser)) {
+    return jsonResponse({ error: "Sem permissao para este endpoint." }, { status: 403 });
+  }
   const target = findEndpointProbeTarget(endpointId, config, registryByEndpointId);
   if (!target) {
     return jsonResponse({ error: "Endpoint nao encontrado ou sem status configurado." }, { status: 404 });
@@ -1149,9 +1716,9 @@ async function handleCatalogSave(request, env) {
   });
 }
 
-async function handleActiveCatalogSave(env) {
+async function handleActiveCatalogSave(env, currentUser = null) {
   const [config, registryByEndpointId] = await Promise.all([loadConfig(env), loadRegistry(env)]);
-  const active = getActiveEndpoint(config);
+  const active = getAuthorizedActiveEndpoint(config, currentUser);
   if (!active) {
     return jsonResponse({ error: "Nenhum endpoint ativo configurado." }, { status: 503 });
   }
@@ -1240,13 +1807,13 @@ async function handleActiveCatalogSave(env) {
   });
 }
 
-async function handleActiveFilesList(env, fileKind) {
+async function handleActiveFilesList(env, fileKind, currentUser = null) {
   const routeConfig = ACTIVE_FILE_ROUTE_CONFIG[fileKind];
   if (!routeConfig) {
     return jsonResponse({ error: "Tipo de arquivo invalido." }, { status: 400 });
   }
 
-  const context = await loadActiveFileAccessContext(env);
+  const context = await loadActiveFileAccessContext(env, currentUser);
   if (context.errorResponse) {
     return context.errorResponse;
   }
@@ -1293,7 +1860,7 @@ async function handleActiveFilesList(env, fileKind) {
   }
 }
 
-async function handleActiveFilesDownload(request, env, fileKind) {
+async function handleActiveFilesDownload(request, env, fileKind, currentUser = null) {
   const routeConfig = ACTIVE_FILE_ROUTE_CONFIG[fileKind];
   if (!routeConfig) {
     return jsonResponse({ error: "Tipo de arquivo invalido." }, { status: 400 });
@@ -1305,7 +1872,7 @@ async function handleActiveFilesDownload(request, env, fileKind) {
     return jsonResponse({ error: "O parametro path e obrigatorio." }, { status: 400 });
   }
 
-  const context = await loadActiveFileAccessContext(env);
+  const context = await loadActiveFileAccessContext(env, currentUser);
   if (context.errorResponse) {
     return context.errorResponse;
   }
@@ -1356,7 +1923,7 @@ async function handleActiveFilesDownload(request, env, fileKind) {
   }
 }
 
-async function handleActiveFilesDelete(request, env, fileKind) {
+async function handleActiveFilesDelete(request, env, fileKind, currentUser = null) {
   const routeConfig = ACTIVE_FILE_ROUTE_CONFIG[fileKind];
   if (!routeConfig) {
     return jsonResponse({ error: "Tipo de arquivo invalido." }, { status: 400 });
@@ -1374,7 +1941,7 @@ async function handleActiveFilesDelete(request, env, fileKind) {
     return jsonResponse({ error: "O campo path e obrigatorio." }, { status: 400 });
   }
 
-  const context = await loadActiveFileAccessContext(env);
+  const context = await loadActiveFileAccessContext(env, currentUser);
   if (context.errorResponse) {
     return context.errorResponse;
   }
@@ -1424,9 +1991,9 @@ async function handleActiveFilesDelete(request, env, fileKind) {
   }
 }
 
-async function loadActiveFileAccessContext(env) {
+async function loadActiveFileAccessContext(env, currentUser = null) {
   const [config, registryByEndpointId] = await Promise.all([loadConfig(env), loadRegistry(env)]);
-  const active = getActiveEndpoint(config);
+  const active = getAuthorizedActiveEndpoint(config, currentUser);
   if (!active) {
     return {
       errorResponse: jsonResponse({ error: "Nenhum endpoint ativo configurado." }, { status: 503 }),
@@ -2664,7 +3231,7 @@ async function proxyToActiveEndpoint(request, env, url) {
   });
 }
 
-async function proxyToEndpointAlias(request, env, url, aliasMatch) {
+async function proxyToEndpointAlias(request, env, url, aliasMatch, currentUser = null) {
   if (aliasMatch.isAliasRoot && (request.method === "GET" || request.method === "HEAD")) {
     const redirectUrl = new URL(request.url);
     redirectUrl.pathname = `${aliasMatch.aliasBasePath}/`;
@@ -2675,6 +3242,9 @@ async function proxyToEndpointAlias(request, env, url, aliasMatch) {
   const endpoint = config.endpoints.find((candidate) => candidate.proxySlug === aliasMatch.proxySlug);
   if (!endpoint) {
     return new Response("Endpoint nao encontrado.", { status: 404 });
+  }
+  if (!canUserAccessEndpoint(endpoint, currentUser)) {
+    return new Response("Sem permissao para este endpoint.", { status: 403 });
   }
 
   return proxyEndpointRequest(request, url, endpoint, {

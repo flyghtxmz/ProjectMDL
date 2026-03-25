@@ -10,6 +10,36 @@
     <div class="ambient ambient-a"></div>
     <div class="ambient ambient-b"></div>
     <main class="shell">
+      <section id="auth-panel" class="panel auth-panel" hidden>
+        <div class="panel-head">
+          <div>
+            <h2>Login</h2>
+            <p class="panel-subtitle">Entre no painel para acessar os endpoints atribuídos.</p>
+          </div>
+        </div>
+
+        <form id="login-form" class="stack auth-form">
+          <label class="field">
+            <span>Login</span>
+            <input id="login-username" type="text" placeholder="admin" required />
+          </label>
+
+          <label class="field">
+            <span>Senha</span>
+            <input id="login-password" type="password" placeholder="••••••••" required />
+          </label>
+
+          <div class="actions">
+            <button id="login-submit-button" type="submit">Entrar</button>
+          </div>
+        </form>
+
+        <div class="status-box" id="login-status-box">
+          Configure o administrador bootstrap no Worker para liberar o primeiro acesso.
+        </div>
+      </section>
+
+      <div id="dashboard-shell" hidden>
       <section class="hero">
         <div>
           <p class="eyebrow">Cloudflare + Modal</p>
@@ -24,6 +54,9 @@
           <code id="proxy-base">carregando...</code>
           <span class="hero-label">Endpoint ativo</span>
           <strong id="active-endpoint-name">nenhum</strong>
+          <span class="hero-label">Sessao</span>
+          <strong id="session-user-name">nao autenticado</strong>
+          <button id="logout-button" class="ghost-button" type="button">Sair</button>
         </div>
       </section>
 
@@ -154,8 +187,18 @@
             </label>
 
             <label class="field">
+              <span>Login</span>
+              <input id="user-username" type="text" placeholder="felipe" required />
+            </label>
+
+            <label class="field">
               <span>Email</span>
               <input id="user-email" type="email" placeholder="usuario@exemplo.com" />
+            </label>
+
+            <label class="field">
+              <span>Senha</span>
+              <input id="user-password" type="password" placeholder="Defina uma senha inicial" />
             </label>
 
             <label class="field">
@@ -306,6 +349,7 @@
           </table>
         </div>
       </section>
+      </div>
     </main>
 
     <template id="endpoint-row-template">
