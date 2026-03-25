@@ -153,6 +153,40 @@ h1 {
   margin-bottom: 20px;
 }
 
+.view-toolbar {
+  margin-bottom: 20px;
+}
+
+.admin-tabs-panel {
+  margin-bottom: 20px;
+}
+
+.admin-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.view-toolbar-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 12px;
+}
+
+.view-toggle {
+  display: inline-flex;
+  gap: 8px;
+  padding: 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(155, 177, 194, 0.12);
+}
+
+.preview-user-field {
+  min-width: 260px;
+}
+
 .panel {
   padding: 20px;
 }
@@ -336,6 +370,12 @@ button:disabled {
   min-height: 1.55em;
 }
 
+.endpoint-ownership {
+  color: #d6f6ff;
+  line-height: 1.55;
+  font-size: 13px;
+}
+
 .endpoint-proxy-summary {
   color: #d6f6ff;
   line-height: 1.55;
@@ -498,6 +538,75 @@ button:disabled {
   background: rgba(140, 224, 255, 0.05);
 }
 
+.users-list {
+  display: grid;
+  gap: 12px;
+}
+
+.permissions-list {
+  display: grid;
+  gap: 12px;
+}
+
+.permission-card {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(155, 177, 194, 0.12);
+}
+
+.permission-card-head {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 14px;
+  align-items: center;
+}
+
+.permission-card-subtitle {
+  color: var(--muted);
+  margin-top: 6px;
+  font-size: 13px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.permission-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: end;
+}
+
+.user-card {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 16px;
+  padding: 16px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(155, 177, 194, 0.12);
+}
+
+.user-card-main {
+  display: grid;
+  gap: 6px;
+}
+
+.user-email,
+.user-notes {
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.user-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .files-panel {
   margin-top: 20px;
 }
@@ -591,12 +700,21 @@ button:disabled {
 @media (max-width: 900px) {
   .hero,
   .grid,
-  .endpoint-card {
+  .endpoint-card,
+  .user-card {
     grid-template-columns: 1fr;
   }
 
   .endpoint-actions {
     justify-content: flex-start;
+  }
+
+  .user-card-actions {
+    justify-content: flex-start;
+  }
+
+  .permission-card-head {
+    grid-template-columns: 1fr;
   }
 
   .overview-grid,

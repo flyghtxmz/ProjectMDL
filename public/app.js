@@ -1,4 +1,7 @@
 const state = {
+  viewMode: "admin",
+  adminTab: "overview",
+  previewUserId: "",
   config: {
     endpoints: [],
     activeEndpointId: null,
@@ -25,6 +28,7 @@ const state = {
   catalogDirty: false,
   catalogDirtyEntryIds: {},
   catalogSaving: false,
+  users: [],
   activeFiles: {
     activeTab: "workflows",
     loadingKind: null,
@@ -51,6 +55,12 @@ const state = {
 };
 
 const elements = {
+  adminModeButton: document.getElementById("admin-mode-button"),
+  userModeButton: document.getElementById("user-mode-button"),
+  previewUserSelect: document.getElementById("preview-user-select"),
+  viewModeSummary: document.getElementById("view-mode-summary"),
+  adminTabButtons: [...document.querySelectorAll("[data-admin-tab-target]")],
+  adminTabSections: [...document.querySelectorAll("[data-admin-tab]")],
   refreshButton: document.getElementById("refresh-button"),
   refreshCatalogButton: document.getElementById("refresh-catalog-button"),
   refreshFilesButton: document.getElementById("refresh-files-button"),
@@ -73,6 +83,17 @@ const elements = {
   filesTableBody: document.getElementById("files-table-body"),
   filesTabWorkflows: document.getElementById("files-tab-workflows"),
   filesTabImages: document.getElementById("files-tab-images"),
+  usersCounter: document.getElementById("users-counter"),
+  usersList: document.getElementById("users-list"),
+  permissionsList: document.getElementById("permissions-list"),
+  userTemplate: document.getElementById("user-row-template"),
+  userForm: document.getElementById("user-form"),
+  userId: document.getElementById("user-id"),
+  userName: document.getElementById("user-name"),
+  userEmail: document.getElementById("user-email"),
+  userNotes: document.getElementById("user-notes"),
+  cancelUserEditButton: document.getElementById("cancel-user-edit-button"),
+  userFormMode: document.getElementById("user-form-mode"),
   endpointList: document.getElementById("endpoint-list"),
   endpointTemplate: document.getElementById("endpoint-row-template"),
   endpointForm: document.getElementById("endpoint-form"),
@@ -80,9 +101,11 @@ const elements = {
   endpointName: document.getElementById("endpoint-name"),
   endpointUrl: document.getElementById("endpoint-url"),
   endpointNotes: document.getElementById("endpoint-notes"),
+  endpointAssignedUserId: document.getElementById("endpoint-assigned-user-id"),
   endpointEnabled: document.getElementById("endpoint-enabled"),
   cancelEditButton: document.getElementById("cancel-edit-button"),
   formMode: document.getElementById("form-mode"),
+  adminOnlySections: [...document.querySelectorAll("[data-admin-only='true']")],
 };
 
 boot();
@@ -93,6 +116,27 @@ function boot() {
 }
 
 function bindEvents() {
+  for (const button of elements.adminTabButtons) {
+    button.addEventListener("click", () => {
+      const nextTab = button.dataset.adminTabTarget || "overview";
+      state.adminTab = nextTab;
+      render();
+    });
+  }
+
+  elements.adminModeButton.addEventListener("click", () => {
+    setViewMode("admin");
+  });
+
+  elements.userModeButton.addEventListener("click", () => {
+    setViewMode("user");
+  });
+
+  elements.previewUserSelect.addEventListener("change", (event) => {
+    state.previewUserId = event.currentTarget.value;
+    render();
+  });
+
   elements.refreshButton.addEventListener("click", () => {
     refreshConfig({ showStatus: true });
   });
@@ -118,6 +162,19 @@ function bindEvents() {
   });
 
   elements.cancelEditButton.addEventListener("click", resetForm);
+
+  elements.userForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    try {
+      await saveUser();
+      resetUserForm();
+      setStatus("Usuario salvo com sucesso.");
+    } catch (error) {
+      setStatus(error.message, true);
+    }
+  });
+
+  elements.cancelUserEditButton.addEventListener("click", resetUserForm);
 
   elements.endpointForm.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -152,19 +209,22 @@ async function refreshConfig(options = {}) {
     return;
   }
   try {
-    const [config, catalog, statusError] = await Promise.all([
+    const [config, catalog, usersPayload, statusError] = await Promise.all([
       api("/api/config"),
       api("/api/catalog"),
+      api("/api/users"),
       refreshEndpointStatuses(),
     ]);
     const previousActiveEndpointId = state.config.activeEndpoint?.id || state.config.activeEndpointId;
     state.config = config;
     state.catalog = catalog;
+    state.users = usersPayload.users || [];
     state.catalogDirty = false;
     state.catalogDirtyEntryIds = {};
     if (previousActiveEndpointId !== (config.activeEndpoint?.id || config.activeEndpointId)) {
       resetActiveFilesState();
     }
+    syncPreviewUserSelection();
     render();
     await refreshActiveFiles({
       kind: state.activeFiles.activeTab,
@@ -256,15 +316,45 @@ async function refreshEndpointStatuses() {
 }
 
 function render() {
-  const active = state.config.activeEndpoint;
+  const active = getCurrentVisibleActiveEndpoint();
   const displayEndpoints = getDisplayEndpoints();
   elements.proxyBase.textContent = `${location.origin}/modal`;
   elements.activeEndpointName.textContent = active ? active.name : "nenhum";
   elements.endpointCounter.textContent = buildEndpointCounterText(displayEndpoints);
+  renderViewMode();
   renderOverview();
+  renderUsers();
+  renderPermissions();
   renderEndpointList(displayEndpoints);
   renderCatalog();
   renderFiles();
+}
+
+function renderViewMode() {
+  const isAdmin = state.viewMode === "admin";
+  elements.adminModeButton.classList.toggle("is-active", isAdmin);
+  elements.userModeButton.classList.toggle("is-active", !isAdmin);
+  for (const section of elements.adminOnlySections) {
+    section.hidden = !isAdmin;
+  }
+  for (const button of elements.adminTabButtons) {
+    const isCurrent = button.dataset.adminTabTarget === state.adminTab;
+    button.classList.toggle("is-active", isCurrent);
+    button.setAttribute("aria-selected", String(isCurrent));
+  }
+  for (const section of elements.adminTabSections) {
+    const targetTab = section.dataset.adminTab;
+    const isAdminOnly = section.dataset.adminOnly === "true";
+    section.hidden =
+      state.viewMode === "admin"
+        ? Boolean(targetTab && targetTab !== state.adminTab)
+        : isAdminOnly;
+  }
+  elements.previewUserSelect.disabled = !state.users.length;
+  populatePreviewUserSelect();
+  elements.viewModeSummary.textContent = isAdmin
+    ? "Administrador com acesso completo ao painel."
+    : buildUserModeSummary();
 }
 
 function renderOverview() {
@@ -291,6 +381,173 @@ function renderOverview() {
     : "Importar e persistir o catalogo do endpoint ativo.";
 }
 
+function renderUsers() {
+  elements.usersCounter.textContent = `${state.users.length} usuario(s)`;
+  replaceSelectOptions(
+    elements.endpointAssignedUserId,
+    "Sem atribuicao",
+    state.users.map((user) => user.id),
+    elements.endpointAssignedUserId.value
+  );
+  for (const option of elements.endpointAssignedUserId.options) {
+    const user = state.users.find((candidate) => candidate.id === option.value);
+    if (user) {
+      option.textContent = user.name;
+    }
+  }
+
+  elements.usersList.innerHTML = "";
+  if (!state.users.length) {
+    const empty = document.createElement("div");
+    empty.className = "status-box";
+    empty.textContent = "Nenhum usuario cadastrado ainda.";
+    elements.usersList.append(empty);
+    return;
+  }
+
+  for (const user of state.users) {
+    const fragment = elements.userTemplate.content.cloneNode(true);
+    fragment.querySelector(".user-name").textContent = user.name;
+    fragment.querySelector(".user-email").textContent = user.email || "Sem email";
+    fragment.querySelector(".user-notes").textContent = user.notes || "Sem notas.";
+    fragment.querySelector(".preview-user-button").addEventListener("click", () => {
+      state.previewUserId = user.id;
+      setViewMode("user");
+    });
+    fragment.querySelector(".edit-user-button").addEventListener("click", () => populateUserForm(user));
+    fragment.querySelector(".delete-user-button").addEventListener("click", () => removeUser(user.id));
+    elements.usersList.append(fragment);
+  }
+}
+
+function renderPermissions() {
+  elements.permissionsList.innerHTML = "";
+  if (!state.config.endpoints.length) {
+    const empty = document.createElement("div");
+    empty.className = "status-box";
+    empty.textContent = "Nenhum endpoint configurado ainda.";
+    elements.permissionsList.append(empty);
+    return;
+  }
+
+  for (const endpoint of state.config.endpoints) {
+    const card = document.createElement("article");
+    card.className = "permission-card";
+
+    const header = document.createElement("div");
+    header.className = "permission-card-head";
+
+    const titleBlock = document.createElement("div");
+    const title = document.createElement("strong");
+    title.textContent = endpoint.name;
+    const subtitle = document.createElement("p");
+    subtitle.className = "permission-card-subtitle";
+    subtitle.textContent = buildEndpointUiUrl(endpoint) || endpoint.url;
+    titleBlock.append(title, subtitle);
+
+    const controls = document.createElement("div");
+    controls.className = "permission-controls";
+
+    const userField = document.createElement("label");
+    userField.className = "field compact-field";
+    const userSpan = document.createElement("span");
+    userSpan.textContent = "Usuario";
+    const userSelect = document.createElement("select");
+    const currentValue = endpoint.assignedUserId || "";
+    replaceSelectOptions(
+      userSelect,
+      "Sem atribuicao",
+      state.users.map((user) => user.id),
+      currentValue
+    );
+    for (const option of userSelect.options) {
+      const user = state.users.find((candidate) => candidate.id === option.value);
+      if (user) {
+        option.textContent = user.name;
+      }
+    }
+    userSelect.addEventListener("change", () => {
+      saveEndpointPermissions(endpoint.id, {
+        assignedUserId: userSelect.value || null,
+        userCanDeploy: deployToggle.checked,
+      });
+    });
+    userField.append(userSpan, userSelect);
+
+    const deployField = document.createElement("label");
+    deployField.className = "toggle";
+    const deployToggle = document.createElement("input");
+    deployToggle.type = "checkbox";
+    deployToggle.checked = endpoint.userCanDeploy !== false;
+    deployToggle.addEventListener("change", () => {
+      saveEndpointPermissions(endpoint.id, {
+        assignedUserId: userSelect.value || null,
+        userCanDeploy: deployToggle.checked,
+      });
+    });
+    const deployText = document.createElement("span");
+    deployText.textContent = "Usuario pode deploy/stop";
+    deployField.append(deployToggle, deployText);
+
+    controls.append(userField, deployField);
+    header.append(titleBlock, controls);
+    card.append(header);
+    elements.permissionsList.append(card);
+  }
+}
+
+function populatePreviewUserSelect() {
+  const selectedValue = state.previewUserId;
+  elements.previewUserSelect.innerHTML = "";
+  const defaultOption = document.createElement("option");
+  defaultOption.value = "";
+  defaultOption.textContent = "Selecione um usuario";
+  elements.previewUserSelect.append(defaultOption);
+  for (const user of state.users) {
+    const option = document.createElement("option");
+    option.value = user.id;
+    option.textContent = user.name;
+    elements.previewUserSelect.append(option);
+  }
+  elements.previewUserSelect.value = state.users.some((user) => user.id === selectedValue)
+    ? selectedValue
+    : "";
+}
+
+function syncPreviewUserSelection() {
+  if (!state.users.length) {
+    state.previewUserId = "";
+    return;
+  }
+  if (state.previewUserId && state.users.some((user) => user.id === state.previewUserId)) {
+    return;
+  }
+  state.previewUserId = state.users[0].id;
+}
+
+function buildUserModeSummary() {
+  const previewUser = getPreviewUser();
+  if (!previewUser) {
+    return "Modo usuario sem um usuario selecionado. Cadastre um usuario e selecione-o para visualizar a tela.";
+  }
+  const assignedCount = state.config.endpoints.filter(
+    (endpoint) => endpoint.assignedUserId === previewUser.id
+  ).length;
+  return `Visualizando como ${previewUser.name}. Ele vera ${assignedCount} endpoint(s) atribuido(s).`;
+}
+
+function getPreviewUser() {
+  return state.users.find((user) => user.id === state.previewUserId) || null;
+}
+
+function setViewMode(mode) {
+  state.viewMode = mode === "user" ? "user" : "admin";
+  if (state.viewMode === "user") {
+    syncPreviewUserSelection();
+  }
+  render();
+}
+
 function renderCatalog() {
   const entries = getFilteredCatalogEntries();
   const totalEntries = Number(state.catalog.totalEntries || state.catalog.entries.length || 0);
@@ -303,7 +560,7 @@ function renderCatalog() {
 function renderFiles() {
   const kind = state.activeFiles.activeTab;
   const bucket = state.activeFiles.byKind[kind];
-  const activeEndpoint = state.config.activeEndpoint;
+  const activeEndpoint = getCurrentVisibleActiveEndpoint();
   const isLoading = state.activeFiles.loadingKind === kind;
 
   elements.filesTabWorkflows.classList.toggle("is-active", kind === "workflows");
@@ -643,6 +900,7 @@ function renderEndpointList(displayEndpoints) {
     const name = fragment.querySelector(".endpoint-name");
     const url = fragment.querySelector(".endpoint-url");
     const notes = fragment.querySelector(".endpoint-notes");
+    const ownership = fragment.querySelector(".endpoint-ownership");
     const proxySummary = fragment.querySelector(".endpoint-proxy-summary");
     const activeBadge = fragment.querySelector(".active-badge");
     const disabledBadge = fragment.querySelector(".disabled-badge");
@@ -658,6 +916,9 @@ function renderEndpointList(displayEndpoints) {
     const publicLink = fragment.querySelector(".public-link");
     const actions = fragment.querySelector(".endpoint-actions");
     const refreshStatusButton = fragment.querySelector(".refresh-status-button");
+    const deployButton = fragment.querySelector(".deploy-button");
+    const stopButton = fragment.querySelector(".stop-button");
+    const restartButton = fragment.querySelector(".restart-button");
     const activateButton = fragment.querySelector(".activate-button");
     const editButton = fragment.querySelector(".edit-button");
     const deleteButton = fragment.querySelector(".delete-button");
@@ -668,14 +929,20 @@ function renderEndpointList(displayEndpoints) {
     const isRefreshing = state.refreshingEndpointIds[endpoint.id] === true;
 
     name.textContent = endpoint.name;
+    const cloudflareUiUrl = buildEndpointUiUrl(endpoint);
     url.textContent =
-      endpoint.url ||
-      liveStatus?.publicBaseUrl ||
-      registry?.publicBaseUrl ||
-      liveStatus?.workflowApiEndpoint ||
-      registry?.workflowApiEndpoint ||
-      "Sem URL reportada.";
+      state.viewMode === "user"
+        ? cloudflareUiUrl || "UI indisponivel no dominio do dashboard."
+        : endpoint.url ||
+          liveStatus?.publicBaseUrl ||
+          registry?.publicBaseUrl ||
+          liveStatus?.workflowApiEndpoint ||
+          registry?.workflowApiEndpoint ||
+          "Sem URL reportada.";
     notes.textContent = buildEndpointNotes(endpoint);
+    const assignedUser = state.users.find((user) => user.id === endpoint.assignedUserId) || null;
+    ownership.hidden = !assignedUser;
+    ownership.textContent = assignedUser ? `Atribuido a: ${assignedUser.name}` : "";
     const proxyPath = buildEndpointProxyPath(endpoint);
     proxySummary.hidden = !proxyPath;
     proxySummary.textContent = proxyPath ? `UI Cloudflare: ${proxyPath}` : "";
@@ -685,12 +952,34 @@ function renderEndpointList(displayEndpoints) {
     unmanagedBadge.hidden = isConfigured || !registry;
     refreshStatusButton.hidden = !canRefresh;
     refreshStatusButton.disabled = isRefreshing;
+    const canOperateEndpoint = Boolean(endpoint.modalAccountKey && endpoint.modalAppName);
+    const userCanOperateEndpoint = canOperateEndpoint && endpoint.userCanDeploy !== false;
+    deployButton.hidden = !isConfigured || !canOperateEndpoint;
+    stopButton.hidden = !isConfigured || !canOperateEndpoint;
+    restartButton.hidden = !isConfigured || !canOperateEndpoint;
     activateButton.disabled =
       !isConfigured || !endpoint.enabled || state.config.activeEndpoint?.id === endpoint.id;
-    actions.hidden = !isConfigured && !canRefresh;
-    activateButton.hidden = !isConfigured;
-    editButton.hidden = !isConfigured;
-    deleteButton.hidden = !isConfigured;
+    if (state.viewMode === "user") {
+      refreshStatusButton.hidden = true;
+      activateButton.hidden = true;
+      editButton.hidden = true;
+      deleteButton.hidden = true;
+      deployButton.textContent = "Ligar";
+      stopButton.textContent = "Desligar";
+      restartButton.textContent = "Reiniciar";
+      deployButton.hidden = !userCanOperateEndpoint;
+      stopButton.hidden = !userCanOperateEndpoint;
+      restartButton.hidden = !userCanOperateEndpoint;
+      actions.hidden = !userCanOperateEndpoint;
+    } else {
+      deployButton.textContent = "Deploy";
+      stopButton.textContent = "Stop";
+      restartButton.textContent = "Restart";
+      actions.hidden = !isConfigured && !canRefresh;
+      activateButton.hidden = !isConfigured;
+      editButton.hidden = !isConfigured;
+      deleteButton.hidden = !isConfigured;
+    }
 
     const liveSummaryText = buildLiveStatusSummary(liveStatus);
     liveStatusSummary.hidden = !liveSummaryText;
@@ -700,22 +989,37 @@ function renderEndpointList(displayEndpoints) {
     registrySummary.hidden = !summaryText;
     registrySummary.textContent = summaryText;
 
-    const hasLinks = [
-      applyOptionalLink(uiLink, buildEndpointUiUrl(endpoint)),
-      applyOptionalLink(statusLink, liveStatus?.statusEndpoint || registry?.statusEndpoint),
-      applyOptionalLink(
-        workflowLink,
-        liveStatus?.workflowApiEndpoint || registry?.workflowApiEndpoint
-      ),
-      applyOptionalLink(promptLink, liveStatus?.promptStatusEndpoint || registry?.promptStatusEndpoint),
-      applyOptionalLink(publicLink, liveStatus?.publicBaseUrl || registry?.publicBaseUrl || endpoint.url),
-    ].some(Boolean);
+    const hasLinks =
+      state.viewMode === "user"
+        ? [applyOptionalLink(uiLink, cloudflareUiUrl)].some(Boolean)
+        : [
+            applyOptionalLink(uiLink, cloudflareUiUrl),
+            applyOptionalLink(statusLink, liveStatus?.statusEndpoint || registry?.statusEndpoint),
+            applyOptionalLink(
+              workflowLink,
+              liveStatus?.workflowApiEndpoint || registry?.workflowApiEndpoint
+            ),
+            applyOptionalLink(
+              promptLink,
+              liveStatus?.promptStatusEndpoint || registry?.promptStatusEndpoint
+            ),
+            applyOptionalLink(
+              publicLink,
+              liveStatus?.publicBaseUrl || registry?.publicBaseUrl || endpoint.url
+            ),
+          ].some(Boolean);
     endpointLinks.hidden = !hasLinks;
 
     if (canRefresh) {
       refreshStatusButton.addEventListener("click", () =>
         refreshSingleEndpointStatus(endpoint.id, endpoint.name)
       );
+    }
+
+    if (isConfigured && canOperateEndpoint) {
+      deployButton.addEventListener("click", () => dispatchJobForEndpoint(endpoint, "deploy"));
+      stopButton.addEventListener("click", () => dispatchJobForEndpoint(endpoint, "stop"));
+      restartButton.addEventListener("click", () => dispatchJobForEndpoint(endpoint, "restart"));
     }
 
     if (isConfigured) {
@@ -752,10 +1056,57 @@ function getDisplayEndpoints() {
       configured: false,
       registry: record,
     }));
-  return configuredEndpoints.concat(discoveredEndpoints);
+  const combined = configuredEndpoints.concat(discoveredEndpoints);
+  if (state.viewMode !== "user") {
+    return combined;
+  }
+  const previewUser = getPreviewUser();
+  if (!previewUser) {
+    return [];
+  }
+  return combined.filter(
+    (endpoint) => endpoint.configured && endpoint.assignedUserId === previewUser.id
+  );
+}
+
+function getCurrentVisibleActiveEndpoint() {
+  if (state.viewMode !== "user") {
+    return state.config.activeEndpoint;
+  }
+  const previewUser = getPreviewUser();
+  if (!previewUser) {
+    return null;
+  }
+  const assignedActive =
+    state.config.activeEndpoint && state.config.activeEndpoint.assignedUserId === previewUser.id
+      ? state.config.activeEndpoint
+      : null;
+  if (assignedActive) {
+    return assignedActive;
+  }
+  return state.config.endpoints.find(
+    (endpoint) => endpoint.enabled !== false && endpoint.assignedUserId === previewUser.id
+  ) || null;
 }
 
 function buildEndpointCounterText(displayEndpoints) {
+  if (state.viewMode === "user") {
+    const previewUser = getPreviewUser();
+    const assignedCount = displayEndpoints.length;
+    const onlineCount = Object.values(state.endpointStatusesById).filter(
+      (status) =>
+        status.reachable &&
+        status.ok &&
+        displayEndpoints.some((endpoint) => endpoint.id === status.endpointId)
+    ).length;
+    const parts = [
+      previewUser ? `${assignedCount} atribuídos para ${previewUser.name}` : `${assignedCount} atribuídos`,
+    ];
+    if (onlineCount) {
+      parts.push(`${onlineCount} online`);
+    }
+    return parts.join(" | ");
+  }
   const configuredCount = state.config.endpoints.length;
   const registryCount = Number(state.config.registryCount || 0);
   const discoveredCount = displayEndpoints.filter((endpoint) => endpoint.configured === false).length;
@@ -950,11 +1301,14 @@ function formatBytes(value) {
 
 function buildConfigWithFormChanges() {
   const id = elements.endpointId.value.trim() || crypto.randomUUID();
+  const current = state.config.endpoints.find((endpoint) => endpoint.id === id) || {};
   const entry = {
+    ...current,
     id,
     name: elements.endpointName.value.trim(),
     url: elements.endpointUrl.value.trim(),
     notes: elements.endpointNotes.value.trim(),
+    assignedUserId: elements.endpointAssignedUserId.value.trim() || null,
     enabled: elements.endpointEnabled.checked,
   };
   if (!entry.name) {
@@ -985,6 +1339,7 @@ function populateForm(endpoint) {
   elements.endpointName.value = endpoint.name;
   elements.endpointUrl.value = endpoint.url;
   elements.endpointNotes.value = endpoint.notes || "";
+  elements.endpointAssignedUserId.value = endpoint.assignedUserId || "";
   elements.endpointEnabled.checked = endpoint.enabled !== false;
   elements.formMode.textContent = "edicao";
 }
@@ -993,6 +1348,7 @@ function resetForm() {
   elements.endpointForm.reset();
   elements.endpointId.value = "";
   elements.endpointEnabled.checked = true;
+  elements.endpointAssignedUserId.value = "";
   elements.formMode.textContent = "novo";
 }
 
@@ -1061,7 +1417,7 @@ function resetActiveFilesState() {
 
 async function refreshActiveFiles(options = {}) {
   const kind = options.kind || state.activeFiles.activeTab;
-  const activeEndpoint = state.config.activeEndpoint;
+  const activeEndpoint = getCurrentVisibleActiveEndpoint();
   if (!activeEndpoint) {
     if (!options.suppressMissingActive) {
       setStatus("Nenhum endpoint ativo configurado para consultar arquivos.", true);
@@ -1267,6 +1623,103 @@ async function saveConfig(nextConfig) {
     showStatus: false,
     suppressMissingActive: true,
   });
+}
+
+async function saveEndpointPermissions(endpointId, patch) {
+  const endpoint = state.config.endpoints.find((candidate) => candidate.id === endpointId);
+  if (!endpoint) {
+    return;
+  }
+  const nextConfig = {
+    endpoints: state.config.endpoints.map((candidate) =>
+      candidate.id === endpointId
+        ? {
+            ...candidate,
+            assignedUserId: patch.assignedUserId || null,
+            userCanDeploy: patch.userCanDeploy !== false,
+          }
+        : candidate
+    ),
+    activeEndpointId: state.config.activeEndpointId,
+  };
+  await saveConfig(nextConfig);
+  setStatus(`Permissoes atualizadas para ${endpoint.name}.`);
+}
+
+async function saveUser() {
+  const payload = await api("/api/users", {
+    method: "POST",
+    body: {
+      id: elements.userId.value.trim() || undefined,
+      name: elements.userName.value.trim(),
+      email: elements.userEmail.value.trim(),
+      notes: elements.userNotes.value.trim(),
+      role: "user",
+    },
+  });
+  state.users = payload.users || [];
+  syncPreviewUserSelection();
+  render();
+}
+
+function populateUserForm(user) {
+  elements.userId.value = user.id;
+  elements.userName.value = user.name;
+  elements.userEmail.value = user.email || "";
+  elements.userNotes.value = user.notes || "";
+  elements.userFormMode.textContent = "edicao";
+}
+
+function resetUserForm() {
+  elements.userForm.reset();
+  elements.userId.value = "";
+  elements.userFormMode.textContent = "novo";
+}
+
+async function removeUser(userId) {
+  const user = state.users.find((candidate) => candidate.id === userId);
+  if (!user) {
+    return;
+  }
+  if (!confirm(`Remover o usuario "${user.name}"? Os endpoints atribuidos ficarao sem usuario.`)) {
+    return;
+  }
+  const payload = await api(`/api/users/${encodeURIComponent(userId)}`, {
+    method: "DELETE",
+  });
+  state.users = payload.users || [];
+  if (state.previewUserId === userId) {
+    syncPreviewUserSelection();
+  }
+  await refreshConfig({ showStatus: false, force: true });
+  setStatus(`Usuario removido: ${user.name}.`);
+}
+
+async function dispatchJobForEndpoint(endpoint, action) {
+  const previewUser = getPreviewUser();
+  const payload = await api("/api/jobs", {
+    method: "POST",
+    body: {
+      action,
+      endpointId: endpoint.id,
+      requestedByUserId: state.viewMode === "user" ? previewUser?.id || null : null,
+      requestedByUserName: state.viewMode === "user" ? previewUser?.name || null : null,
+    },
+  });
+  const messageBase =
+    action === "deploy"
+      ? "Deploy disparado"
+      : action === "stop"
+        ? "Stop disparado"
+        : "Restart disparado";
+  if (payload?.job?.status === "dispatched") {
+    setStatus(`${messageBase} para ${endpoint.name}. Workflow: ${payload.job.workflowId}.`);
+  } else {
+    setStatus(
+      payload?.job?.dispatchError || `Falha ao disparar ${action} para ${endpoint.name}.`,
+      true
+    );
+  }
 }
 
 async function api(path, options = {}) {

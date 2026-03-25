@@ -27,7 +27,42 @@
         </div>
       </section>
 
-      <section class="grid">
+      <section class="panel view-toolbar">
+        <div class="panel-head">
+          <div>
+            <h2>Modo de Visualizacao</h2>
+            <p class="panel-subtitle" id="view-mode-summary">
+              Administrador com acesso completo ao painel.
+            </p>
+          </div>
+          <div class="view-toolbar-actions">
+            <div class="view-toggle">
+              <button id="admin-mode-button" class="tab-button is-active" type="button">Administrador</button>
+              <button id="user-mode-button" class="tab-button" type="button">Usuario</button>
+            </div>
+
+            <label class="field compact-field preview-user-field">
+              <span>Visualizar como usuario</span>
+              <select id="preview-user-select">
+                <option value="">Selecione um usuario</option>
+              </select>
+            </label>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel admin-only admin-tabs-panel" data-admin-only="true">
+        <div class="admin-tabs" role="tablist" aria-label="Abas administrativas">
+          <button class="tab-button is-active" type="button" data-admin-tab-target="overview">Overview</button>
+          <button class="tab-button" type="button" data-admin-tab-target="endpoints">Endpoints</button>
+          <button class="tab-button" type="button" data-admin-tab-target="users">Usuarios</button>
+          <button class="tab-button" type="button" data-admin-tab-target="access">Permissoes</button>
+          <button class="tab-button" type="button" data-admin-tab-target="catalog">Catalogo</button>
+          <button class="tab-button" type="button" data-admin-tab-target="files">Arquivos</button>
+        </div>
+      </section>
+
+      <section class="grid admin-only" data-admin-only="true" data-admin-tab="overview">
         <article class="panel">
           <div class="panel-head">
             <h2>Resumo central</h2>
@@ -83,6 +118,13 @@
               <textarea id="endpoint-notes" rows="3" placeholder="Ex.: cold start com Qwen"></textarea>
             </label>
 
+            <label class="field">
+              <span>Usuario atribuido</span>
+              <select id="endpoint-assigned-user-id">
+                <option value="">Sem atribuicao</option>
+              </select>
+            </label>
+
             <label class="toggle">
               <input id="endpoint-enabled" type="checkbox" checked />
               <span>Endpoint habilitado</span>
@@ -96,7 +138,48 @@
         </article>
       </section>
 
-      <section class="panel">
+      <section class="grid admin-only" data-admin-only="true" data-admin-tab="users">
+        <article class="panel">
+          <div class="panel-head">
+            <h2>Usuarios</h2>
+            <span id="users-counter">0 usuarios</span>
+          </div>
+
+          <form id="user-form" class="stack">
+            <input id="user-id" type="hidden" />
+
+            <label class="field">
+              <span>Nome</span>
+              <input id="user-name" type="text" placeholder="Felipe" required />
+            </label>
+
+            <label class="field">
+              <span>Email</span>
+              <input id="user-email" type="email" placeholder="usuario@exemplo.com" />
+            </label>
+
+            <label class="field">
+              <span>Notas</span>
+              <textarea id="user-notes" rows="3" placeholder="Ex.: acesso ao endpoint Business"></textarea>
+            </label>
+
+            <div class="actions">
+              <button type="submit">Salvar usuario</button>
+              <button id="cancel-user-edit-button" class="ghost-button" type="button">Cancelar</button>
+            </div>
+          </form>
+        </article>
+
+        <article class="panel">
+          <div class="panel-head">
+            <h2>Lista de Usuarios</h2>
+            <span id="user-form-mode">novo</span>
+          </div>
+          <div id="users-list" class="users-list"></div>
+        </article>
+      </section>
+
+      <section class="panel" data-admin-tab="endpoints">
         <div class="panel-head">
           <h2>Endpoints</h2>
           <span id="endpoint-counter">0 configurados</span>
@@ -104,7 +187,17 @@
         <div id="endpoint-list" class="endpoint-list"></div>
       </section>
 
-      <section class="panel catalog-panel">
+      <section class="panel admin-only" data-admin-only="true" data-admin-tab="access">
+        <div class="panel-head">
+          <div>
+            <h2>Permissoes de Endpoint</h2>
+            <p class="panel-subtitle">Defina qual usuario ve e pode operar cada endpoint.</p>
+          </div>
+        </div>
+        <div id="permissions-list" class="permissions-list"></div>
+      </section>
+
+      <section class="panel catalog-panel admin-only" data-admin-only="true" data-admin-tab="catalog">
         <div class="panel-head">
           <div>
             <h2>Catalogo</h2>
@@ -159,7 +252,7 @@
         </div>
       </section>
 
-      <section class="panel files-panel">
+      <section class="panel files-panel admin-only" data-admin-only="true" data-admin-tab="files">
         <div class="panel-head">
           <div>
             <h2>Arquivos</h2>
@@ -227,6 +320,7 @@
           </div>
           <code class="endpoint-url"></code>
           <p class="endpoint-notes"></p>
+          <p class="endpoint-ownership" hidden></p>
           <p class="endpoint-proxy-summary" hidden></p>
           <p class="live-status-summary" hidden></p>
           <p class="registry-summary" hidden></p>
@@ -240,9 +334,27 @@
         </div>
         <div class="endpoint-actions">
           <button class="refresh-status-button ghost-button" type="button">Atualizar status</button>
+          <button class="deploy-button ghost-button" type="button">Deploy</button>
+          <button class="stop-button ghost-button" type="button">Stop</button>
+          <button class="restart-button ghost-button" type="button">Restart</button>
           <button class="activate-button" type="button">Ativar</button>
           <button class="edit-button ghost-button" type="button">Editar</button>
           <button class="delete-button danger-button" type="button">Remover</button>
+        </div>
+      </article>
+    </template>
+
+    <template id="user-row-template">
+      <article class="user-card">
+        <div class="user-card-main">
+          <strong class="user-name"></strong>
+          <span class="user-email"></span>
+          <p class="user-notes"></p>
+        </div>
+        <div class="user-card-actions">
+          <button class="preview-user-button ghost-button" type="button">Ver como usuario</button>
+          <button class="edit-user-button ghost-button" type="button">Editar</button>
+          <button class="delete-user-button danger-button" type="button">Remover</button>
         </div>
       </article>
     </template>

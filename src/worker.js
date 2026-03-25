@@ -3,6 +3,10 @@ const REGISTRY_KEY_PREFIX = "registry:endpoint:";
 const CATALOG_ENTRY_KEY_PREFIX = "catalog:entry:";
 const CATALOG_META_KEY = "catalog:meta";
 const CATALOG_SNAPSHOT_KEY = "catalog:snapshot";
+const CONTROL_CONFIG_KEY = "control:config";
+const MODAL_ACCOUNT_KEY_PREFIX = "modal-account:";
+const JOB_KEY_PREFIX = "job:";
+const USERS_KEY = "control:users";
 const CATALOG_MERGE_PRESERVE_EXISTING = "preserve_existing";
 const CATALOG_MERGE_PREFER_INCOMING = "prefer_incoming";
 const DEFAULT_GITHUB_OWNER = "flyghtxmz";
@@ -34,10 +38,21 @@ const ACTIVE_FILE_ROUTE_CONFIG = {
 const DASHBOARD_PATH_PREFIX = "/dashboard";
 const PROXY_SLUG_PREFIX = "cmfy_";
 const MAX_RECENT_CATALOG_SYNCS = 12;
+const MAX_RECENT_JOBS = 40;
 
 const DEFAULT_CONFIG = {
   endpoints: [],
   activeEndpointId: null,
+  updatedAt: null,
+};
+
+const DEFAULT_CONTROL_CONFIG = {
+  githubOwner: null,
+  githubRepo: null,
+  githubRef: "main",
+  deployWorkflowId: "deploy-modal.yml",
+  stopWorkflowId: "stop-modal.yml",
+  restartWorkflowId: "restart-modal.yml",
   updatedAt: null,
 };
 
@@ -71,6 +86,60 @@ export default {
         return withCors(await handleConfigWrite(request, env));
       }
       return withCors(methodNotAllowed(["GET", "PUT"]));
+    }
+
+    if (url.pathname === "/api/control/config") {
+      if (request.method === "GET") {
+        return withCors(jsonResponse(await loadControlConfig(env)));
+      }
+      if (request.method === "PUT") {
+        return withCors(await handleControlConfigWrite(request, env));
+      }
+      return withCors(methodNotAllowed(["GET", "PUT"]));
+    }
+
+    if (url.pathname === "/api/modal-accounts") {
+      if (request.method === "GET") {
+        return withCors(jsonResponse(await buildModalAccountsPayload(env)));
+      }
+      if (request.method === "POST") {
+        return withCors(await handleModalAccountWrite(request, env));
+      }
+      return withCors(methodNotAllowed(["GET", "POST"]));
+    }
+
+    if (url.pathname === "/api/users") {
+      if (request.method === "GET") {
+        return withCors(jsonResponse(await buildUsersPayload(env)));
+      }
+      if (request.method === "POST") {
+        return withCors(await handleUserWrite(request, env));
+      }
+      return withCors(methodNotAllowed(["GET", "POST"]));
+    }
+
+    if (url.pathname.startsWith("/api/users/")) {
+      if (request.method !== "DELETE") {
+        return withCors(methodNotAllowed(["DELETE"]));
+      }
+      return withCors(await handleUserDelete(url.pathname, env));
+    }
+
+    if (url.pathname.startsWith("/api/modal-accounts/")) {
+      if (request.method !== "DELETE") {
+        return withCors(methodNotAllowed(["DELETE"]));
+      }
+      return withCors(await handleModalAccountDelete(url.pathname, env));
+    }
+
+    if (url.pathname === "/api/jobs") {
+      if (request.method === "GET") {
+        return withCors(jsonResponse(await buildJobsPayload(env)));
+      }
+      if (request.method === "POST") {
+        return withCors(await handleJobDispatch(request, env));
+      }
+      return withCors(methodNotAllowed(["GET", "POST"]));
     }
 
     if (url.pathname === "/api/catalog") {
@@ -270,6 +339,467 @@ async function buildConfigPayload(env, config = null) {
     registryByEndpointId,
     registryCount: Object.keys(registryByEndpointId).length,
   };
+}
+
+async function loadControlConfig(env) {
+  const raw = await env.MODAL_ROUTER_KV.get(CONTROL_CONFIG_KEY, "json");
+  return normalizeControlConfig(raw);
+}
+
+async function saveControlConfig(env, payload) {
+  const normalized = normalizeControlConfig(payload);
+  normalized.updatedAt = new Date().toISOString();
+  await env.MODAL_ROUTER_KV.put(CONTROL_CONFIG_KEY, JSON.stringify(normalized));
+  return normalized;
+}
+
+async function handleControlConfigWrite(request, env) {
+  let payload;
+  try {
+    payload = await request.json();
+  } catch {
+    return jsonResponse({ error: "JSON invalido." }, { status: 400 });
+  }
+  return jsonResponse(await saveControlConfig(env, payload));
+}
+
+function normalizeControlConfig(raw) {
+  return {
+    githubOwner: normalizeOptionalText(raw?.githubOwner),
+    githubRepo: normalizeOptionalText(raw?.githubRepo),
+    githubRef: normalizeOptionalText(raw?.githubRef) || DEFAULT_CONTROL_CONFIG.githubRef,
+    deployWorkflowId:
+      normalizeOptionalText(raw?.deployWorkflowId) || DEFAULT_CONTROL_CONFIG.deployWorkflowId,
+    stopWorkflowId:
+      normalizeOptionalText(raw?.stopWorkflowId) || DEFAULT_CONTROL_CONFIG.stopWorkflowId,
+    restartWorkflowId:
+      normalizeOptionalText(raw?.restartWorkflowId) || DEFAULT_CONTROL_CONFIG.restartWorkflowId,
+    updatedAt: normalizeOptionalTimestamp(raw?.updatedAt),
+  };
+}
+
+async function buildModalAccountsPayload(env) {
+  return {
+    ok: true,
+    accounts: await loadModalAccounts(env),
+  };
+}
+
+async function loadModalAccounts(env) {
+  const names = await listKvKeys(env, MODAL_ACCOUNT_KEY_PREFIX);
+  if (!names.length) {
+    return [];
+  }
+  const records = await Promise.all(names.map((name) => env.MODAL_ROUTER_KV.get(name, "json")));
+  return records
+    .map(normalizeModalAccount)
+    .filter(Boolean)
+    .sort((left, right) => String(left.label || left.key).localeCompare(String(right.label || right.key), "pt-BR", { sensitivity: "base" }));
+}
+
+async function handleModalAccountWrite(request, env) {
+  let payload;
+  try {
+    payload = await request.json();
+  } catch {
+    return jsonResponse({ error: "JSON invalido." }, { status: 400 });
+  }
+  let account;
+  try {
+    account = normalizeModalAccount(payload, { generateKey: true });
+  } catch (error) {
+    return jsonResponse({ error: error.message }, { status: 400 });
+  }
+  account.updatedAt = new Date().toISOString();
+  account.createdAt =
+    normalizeOptionalTimestamp(payload?.createdAt) || normalizeOptionalTimestamp(payload?.created_at) || account.updatedAt;
+  await env.MODAL_ROUTER_KV.put(modalAccountKvKey(account.key), JSON.stringify(account));
+  return jsonResponse({
+    ok: true,
+    account,
+    accounts: await loadModalAccounts(env),
+  });
+}
+
+async function handleModalAccountDelete(pathname, env) {
+  const match = pathname.match(/^\/api\/modal-accounts\/([^/]+)$/);
+  const accountKey = decodeURIComponent(match?.[1] || "").trim();
+  if (!accountKey) {
+    return jsonResponse({ error: "Conta Modal invalida." }, { status: 400 });
+  }
+  const accounts = await loadModalAccounts(env);
+  if (!accounts.some((account) => account.key === accountKey)) {
+    return jsonResponse({ error: "Conta Modal nao encontrada." }, { status: 404 });
+  }
+  const config = await loadConfig(env);
+  if (config.endpoints.some((endpoint) => endpoint.modalAccountKey === accountKey)) {
+    return jsonResponse(
+      { error: "Existe endpoint usando esta conta Modal. Remova ou troque a atribuicao antes." },
+      { status: 409 }
+    );
+  }
+  await env.MODAL_ROUTER_KV.delete(modalAccountKvKey(accountKey));
+  return jsonResponse({
+    ok: true,
+    accountKey,
+    accounts: await loadModalAccounts(env),
+  });
+}
+
+function normalizeModalAccount(raw, options = {}) {
+  const key = normalizeAccountKey(raw?.key || raw?.accountKey || raw?.account_key);
+  const label = normalizeOptionalText(raw?.label) || key;
+  if (!key) {
+    throw new Error("Cada conta Modal precisa de um account key.");
+  }
+  return {
+    key,
+    label,
+    githubTokenIdSecretName:
+      normalizeOptionalText(raw?.githubTokenIdSecretName) ||
+      normalizeOptionalText(raw?.github_token_id_secret_name) ||
+      `MODAL_${key.toUpperCase()}_TOKEN_ID`,
+    githubTokenSecretSecretName:
+      normalizeOptionalText(raw?.githubTokenSecretSecretName) ||
+      normalizeOptionalText(raw?.github_token_secret_secret_name) ||
+      `MODAL_${key.toUpperCase()}_TOKEN_SECRET`,
+    notes: normalizeOptionalText(raw?.notes),
+    createdAt:
+      normalizeOptionalTimestamp(raw?.createdAt) || normalizeOptionalTimestamp(raw?.created_at),
+    updatedAt:
+      normalizeOptionalTimestamp(raw?.updatedAt) || normalizeOptionalTimestamp(raw?.updated_at),
+  };
+}
+
+function normalizeAccountKey(value) {
+  const raw = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return raw || null;
+}
+
+function modalAccountKvKey(accountKey) {
+  return `${MODAL_ACCOUNT_KEY_PREFIX}${accountKey}`;
+}
+
+async function buildUsersPayload(env) {
+  return {
+    ok: true,
+    users: await loadUsers(env),
+  };
+}
+
+async function loadUsers(env) {
+  const raw = await env.MODAL_ROUTER_KV.get(USERS_KEY, "json");
+  const users = Array.isArray(raw) ? raw.map(normalizeUser).filter(Boolean) : [];
+  return users.sort((left, right) =>
+    String(left.name || left.email || left.id).localeCompare(String(right.name || right.email || right.id), "pt-BR", {
+      sensitivity: "base",
+    })
+  );
+}
+
+async function saveUsers(env, users) {
+  const normalizedUsers = users.map(normalizeUser).filter(Boolean);
+  await env.MODAL_ROUTER_KV.put(USERS_KEY, JSON.stringify(normalizedUsers));
+  return normalizedUsers;
+}
+
+async function handleUserWrite(request, env) {
+  let payload;
+  try {
+    payload = await request.json();
+  } catch {
+    return jsonResponse({ error: "JSON invalido." }, { status: 400 });
+  }
+  let nextUser;
+  try {
+    nextUser = normalizeUser(payload, { generateId: true });
+  } catch (error) {
+    return jsonResponse({ error: error.message }, { status: 400 });
+  }
+  const users = await loadUsers(env);
+  const remaining = users.filter((user) => user.id !== nextUser.id);
+  const savedUsers = await saveUsers(env, [...remaining, nextUser]);
+  return jsonResponse({
+    ok: true,
+    user: nextUser,
+    users: savedUsers,
+  });
+}
+
+async function handleUserDelete(pathname, env) {
+  const match = pathname.match(/^\/api\/users\/([^/]+)$/);
+  const userId = decodeURIComponent(match?.[1] || "").trim();
+  if (!userId) {
+    return jsonResponse({ error: "Usuario invalido." }, { status: 400 });
+  }
+  const users = await loadUsers(env);
+  if (!users.some((user) => user.id === userId)) {
+    return jsonResponse({ error: "Usuario nao encontrado." }, { status: 404 });
+  }
+  const config = await loadConfig(env);
+  const nextEndpoints = config.endpoints.map((endpoint) =>
+    endpoint.assignedUserId === userId ? { ...endpoint, assignedUserId: null } : endpoint
+  );
+  await saveConfig(env, {
+    ...config,
+    endpoints: nextEndpoints,
+  });
+  const savedUsers = await saveUsers(
+    env,
+    users.filter((user) => user.id !== userId)
+  );
+  return jsonResponse({
+    ok: true,
+    userId,
+    users: savedUsers,
+  });
+}
+
+function normalizeUser(raw, options = {}) {
+  const id = normalizeOptionalText(raw?.id) || (options.generateId ? crypto.randomUUID() : null);
+  const name = normalizeOptionalText(raw?.name);
+  const email = normalizeOptionalText(raw?.email);
+  if (!id) {
+    throw new Error("Cada usuario precisa de um id.");
+  }
+  if (!name) {
+    throw new Error("Cada usuario precisa de um nome.");
+  }
+  return {
+    id,
+    name,
+    email,
+    notes: normalizeOptionalText(raw?.notes),
+    role: normalizeOptionalText(raw?.role) || "user",
+    createdAt:
+      normalizeOptionalTimestamp(raw?.createdAt) ||
+      normalizeOptionalTimestamp(raw?.created_at) ||
+      new Date().toISOString(),
+    updatedAt:
+      normalizeOptionalTimestamp(raw?.updatedAt) ||
+      normalizeOptionalTimestamp(raw?.updated_at) ||
+      new Date().toISOString(),
+  };
+}
+
+async function buildJobsPayload(env) {
+  return {
+    ok: true,
+    jobs: await loadJobs(env),
+  };
+}
+
+async function loadJobs(env) {
+  const names = await listKvKeys(env, JOB_KEY_PREFIX);
+  if (!names.length) {
+    return [];
+  }
+  const records = await Promise.all(names.map((name) => env.MODAL_ROUTER_KV.get(name, "json")));
+  return records
+    .map(normalizeJobRecord)
+    .filter(Boolean)
+    .sort((left, right) => String(right.createdAt).localeCompare(String(left.createdAt)))
+    .slice(0, MAX_RECENT_JOBS);
+}
+
+async function handleJobDispatch(request, env) {
+  let payload;
+  try {
+    payload = await request.json();
+  } catch {
+    return jsonResponse({ error: "JSON invalido." }, { status: 400 });
+  }
+
+  const action = normalizeJobAction(payload?.action);
+  if (!action) {
+    return jsonResponse({ error: "Acao invalida. Use deploy, stop ou restart." }, { status: 400 });
+  }
+
+  const config = await loadConfig(env);
+  const endpointId = normalizeOptionalText(payload?.endpointId) || normalizeOptionalText(payload?.endpoint_id);
+  const endpoint = config.endpoints.find((candidate) => candidate.id === endpointId);
+  if (!endpoint) {
+    return jsonResponse({ error: "Endpoint nao encontrado." }, { status: 404 });
+  }
+
+  const controlConfig = await loadControlConfig(env);
+  const workflowId = resolveJobWorkflowId(action, controlConfig);
+  if (!controlConfig.githubOwner || !controlConfig.githubRepo || !workflowId) {
+    return jsonResponse(
+      { error: "Configure owner, repo e workflow do GitHub antes de disparar jobs." },
+      { status: 400 }
+    );
+  }
+
+  if (!endpoint.modalAccountKey || !endpoint.modalAppName) {
+    return jsonResponse(
+      { error: "O endpoint precisa ter conta Modal e app name configurados para operar jobs." },
+      { status: 400 }
+    );
+  }
+
+  const modalAccounts = await loadModalAccounts(env);
+  const modalAccount = modalAccounts.find((account) => account.key === endpoint.modalAccountKey);
+  if (!modalAccount) {
+    return jsonResponse({ error: "Conta Modal do endpoint nao encontrada." }, { status: 400 });
+  }
+
+  const githubToken = String(env?.GITHUB_ACTIONS_TOKEN || "").trim();
+  if (!githubToken) {
+    return jsonResponse({ error: "GITHUB_ACTIONS_TOKEN nao configurado." }, { status: 503 });
+  }
+
+  const job = {
+    id: crypto.randomUUID(),
+    action,
+    status: "queued",
+    endpointId: endpoint.id,
+    endpointName: endpoint.name,
+    modalAccountKey: endpoint.modalAccountKey,
+    modalAccountLabel: modalAccount.label,
+    modalAppName: endpoint.modalAppName,
+    githubOwner: controlConfig.githubOwner,
+    githubRepo: controlConfig.githubRepo,
+    githubRef: endpoint.githubRef || controlConfig.githubRef,
+    workflowId,
+    entryFile: endpoint.entryFile || "comfyui_modal.py",
+    requestedByUserId:
+      normalizeOptionalText(payload?.requestedByUserId) ||
+      normalizeOptionalText(payload?.requested_by_user_id),
+    requestedByUserName:
+      normalizeOptionalText(payload?.requestedByUserName) ||
+      normalizeOptionalText(payload?.requested_by_user_name),
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    dispatchStatus: null,
+    dispatchError: null,
+  };
+
+  await env.MODAL_ROUTER_KV.put(jobKvKey(job.id), JSON.stringify(job));
+
+  const dispatchUrl = `https://api.github.com/repos/${encodeURIComponent(controlConfig.githubOwner)}/${encodeURIComponent(controlConfig.githubRepo)}/actions/workflows/${encodeURIComponent(workflowId)}/dispatches`;
+  const dispatchBody = {
+    ref: endpoint.githubRef || controlConfig.githubRef,
+    inputs: {
+      job_id: job.id,
+      action,
+      endpoint_id: endpoint.id,
+      endpoint_name: endpoint.name,
+      modal_account_key: endpoint.modalAccountKey,
+      modal_account_label: modalAccount.label,
+      modal_token_id_secret_name: modalAccount.githubTokenIdSecretName,
+      modal_token_secret_secret_name: modalAccount.githubTokenSecretSecretName,
+      modal_app_name: endpoint.modalAppName,
+      entry_file: endpoint.entryFile || "comfyui_modal.py",
+      endpoint_url: endpoint.url,
+    },
+  };
+
+  try {
+    const dispatchResponse = await fetch(dispatchUrl, {
+      method: "POST",
+      headers: {
+        accept: "application/vnd.github+json",
+        authorization: `Bearer ${githubToken}`,
+        "content-type": "application/json; charset=utf-8",
+        "user-agent": "projectmdl-worker",
+        "x-github-api-version": "2022-11-28",
+      },
+      body: JSON.stringify(dispatchBody),
+    });
+    if (!dispatchResponse.ok) {
+      job.status = "failed";
+      job.dispatchStatus = dispatchResponse.status;
+      job.dispatchError = await readGitHubErrorBody(dispatchResponse);
+    } else {
+      job.status = "dispatched";
+      job.dispatchStatus = dispatchResponse.status;
+      job.dispatchedAt = new Date().toISOString();
+    }
+  } catch (error) {
+    job.status = "failed";
+    job.dispatchError = error instanceof Error ? error.message : "Falha ao disparar workflow.";
+  }
+
+  job.updatedAt = new Date().toISOString();
+  await env.MODAL_ROUTER_KV.put(jobKvKey(job.id), JSON.stringify(job));
+
+  return jsonResponse({
+    ok: job.status === "dispatched",
+    job,
+    jobs: await loadJobs(env),
+  });
+}
+
+function normalizeJobAction(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  return ["deploy", "stop", "restart"].includes(raw) ? raw : null;
+}
+
+function resolveJobWorkflowId(action, controlConfig) {
+  if (action === "deploy") {
+    return controlConfig.deployWorkflowId;
+  }
+  if (action === "stop") {
+    return controlConfig.stopWorkflowId;
+  }
+  if (action === "restart") {
+    return controlConfig.restartWorkflowId || controlConfig.deployWorkflowId;
+  }
+  return null;
+}
+
+function jobKvKey(jobId) {
+  return `${JOB_KEY_PREFIX}${jobId}`;
+}
+
+function normalizeJobRecord(raw) {
+  const id = normalizeOptionalText(raw?.id);
+  if (!id) {
+    return null;
+  }
+  return {
+    id,
+    action: normalizeOptionalText(raw?.action) || "deploy",
+    status: normalizeOptionalText(raw?.status) || "queued",
+    endpointId: normalizeOptionalText(raw?.endpointId),
+    endpointName: normalizeOptionalText(raw?.endpointName),
+    modalAccountKey: normalizeOptionalText(raw?.modalAccountKey),
+    modalAccountLabel: normalizeOptionalText(raw?.modalAccountLabel),
+    modalAppName: normalizeOptionalText(raw?.modalAppName),
+    githubOwner: normalizeOptionalText(raw?.githubOwner),
+    githubRepo: normalizeOptionalText(raw?.githubRepo),
+    githubRef: normalizeOptionalText(raw?.githubRef),
+    workflowId: normalizeOptionalText(raw?.workflowId),
+    entryFile: normalizeOptionalText(raw?.entryFile),
+    requestedByUserId: normalizeOptionalText(raw?.requestedByUserId),
+    requestedByUserName: normalizeOptionalText(raw?.requestedByUserName),
+    createdAt: normalizeOptionalTimestamp(raw?.createdAt),
+    updatedAt: normalizeOptionalTimestamp(raw?.updatedAt),
+    dispatchedAt: normalizeOptionalTimestamp(raw?.dispatchedAt),
+    dispatchStatus: normalizeOptionalInteger(raw?.dispatchStatus),
+    dispatchError: normalizeOptionalText(raw?.dispatchError),
+  };
+}
+
+async function listKvKeys(env, prefix) {
+  const names = [];
+  let cursor = undefined;
+  do {
+    const page = await env.MODAL_ROUTER_KV.list({
+      prefix,
+      cursor,
+    });
+    for (const entry of page.keys) {
+      names.push(entry.name);
+    }
+    cursor = page.list_complete ? undefined : page.cursor;
+  } while (cursor);
+  return names;
 }
 
 async function buildEndpointStatusesPayload(env) {
@@ -1665,6 +2195,24 @@ function normalizeEndpoint(endpoint) {
   const enabled = endpoint?.enabled !== false;
   const url = normalizeUrl(endpoint?.url || "");
   const proxySlug = normalizeProxySlug(endpoint?.proxySlug);
+  const modalAccountKey = normalizeAccountKey(
+    endpoint?.modalAccountKey || endpoint?.modal_account_key
+  );
+  const modalAppName =
+    normalizeOptionalText(endpoint?.modalAppName) ||
+    normalizeOptionalText(endpoint?.modal_app_name);
+  const entryFile =
+    normalizeOptionalText(endpoint?.entryFile) ||
+    normalizeOptionalText(endpoint?.entry_file) ||
+    "comfyui_modal.py";
+  const githubRef =
+    normalizeOptionalText(endpoint?.githubRef) ||
+    normalizeOptionalText(endpoint?.github_ref);
+  const assignedUserId =
+    normalizeOptionalText(endpoint?.assignedUserId) ||
+    normalizeOptionalText(endpoint?.assigned_user_id);
+  const userCanDeploy =
+    endpoint?.userCanDeploy === false || endpoint?.user_can_deploy === false ? false : true;
   if (!id) {
     throw new Error("Cada endpoint precisa de um id.");
   }
@@ -1674,7 +2222,20 @@ function normalizeEndpoint(endpoint) {
   if (!url) {
     throw new Error(`O endpoint "${name}" precisa de uma URL valida.`);
   }
-  return { id, name, url, notes, enabled, proxySlug };
+  return {
+    id,
+    name,
+    url,
+    notes,
+    enabled,
+    proxySlug,
+    modalAccountKey,
+    modalAppName,
+    entryFile,
+    githubRef,
+    assignedUserId,
+    userCanDeploy,
+  };
 }
 
 function normalizeProxySlug(value) {
