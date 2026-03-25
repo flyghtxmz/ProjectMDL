@@ -41,6 +41,7 @@ const MAX_RECENT_CATALOG_SYNCS = 12;
 const MAX_RECENT_JOBS = 40;
 const SESSION_COOKIE_NAME = "projectmdl_session";
 const SESSION_TTL_SECONDS = 60 * 60 * 12;
+const PASSWORD_PBKDF2_ITERATIONS = 100000;
 
 const DEFAULT_CONFIG = {
   endpoints: [],
@@ -1019,7 +1020,8 @@ async function normalizeUser(raw, options = {}) {
   }
   let passwordHash = normalizeOptionalText(existingUser?.passwordHash);
   let passwordSalt = normalizeOptionalText(existingUser?.passwordSalt);
-  let passwordIterations = normalizeOptionalInteger(existingUser?.passwordIterations) || 120000;
+  let passwordIterations =
+    normalizeOptionalInteger(existingUser?.passwordIterations) || PASSWORD_PBKDF2_ITERATIONS;
   if (password) {
     const passwordRecord = await hashPassword(password);
     passwordHash = passwordRecord.hash;
@@ -1076,7 +1078,8 @@ function normalizeStoredUser(raw) {
         : true,
     passwordHash: normalizeOptionalText(raw?.passwordHash),
     passwordSalt: normalizeOptionalText(raw?.passwordSalt),
-    passwordIterations: normalizeOptionalInteger(raw?.passwordIterations) || 120000,
+    passwordIterations:
+      normalizeOptionalInteger(raw?.passwordIterations) || PASSWORD_PBKDF2_ITERATIONS,
     createdAt:
       normalizeOptionalTimestamp(raw?.createdAt) ||
       normalizeOptionalTimestamp(raw?.created_at),
@@ -1112,7 +1115,12 @@ async function hashPassword(password, options = {}) {
   const saltBytes = options.salt
     ? decodeBase64UrlToBytes(options.salt)
     : crypto.getRandomValues(new Uint8Array(16));
-  const iterations = Number(options.iterations || 120000);
+  const iterations = Number(options.iterations || PASSWORD_PBKDF2_ITERATIONS);
+  if (iterations > PASSWORD_PBKDF2_ITERATIONS) {
+    throw new Error(
+      `PBKDF2 iteration count ${iterations} nao e suportado neste deploy. Redefina a senha para regravar com ${PASSWORD_PBKDF2_ITERATIONS} iteracoes.`
+    );
+  }
   const baseKey = await crypto.subtle.importKey(
     "raw",
     new TextEncoder().encode(String(password || "")),
