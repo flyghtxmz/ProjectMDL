@@ -111,6 +111,7 @@ const elements = {
   userNotes: document.getElementById("user-notes"),
   cancelUserEditButton: document.getElementById("cancel-user-edit-button"),
   userFormMode: document.getElementById("user-form-mode"),
+  userStatusBox: document.getElementById("user-status-box"),
   endpointList: document.getElementById("endpoint-list"),
   endpointTemplate: document.getElementById("endpoint-row-template"),
   endpointForm: document.getElementById("endpoint-form"),
@@ -128,6 +129,7 @@ const elements = {
 boot();
 
 function boot() {
+  resetUserForm();
   bindEvents();
   bootstrapSession();
 }
@@ -194,8 +196,10 @@ function bindEvents() {
     try {
       await saveUser();
       resetUserForm();
+      setUserStatus("Usuario salvo com sucesso.");
       setStatus("Usuario salvo com sucesso.");
     } catch (error) {
+      setUserStatus(error.message, true);
       setStatus(error.message, true);
     }
   });
@@ -1809,6 +1813,11 @@ async function saveEndpointPermissions(endpointId, patch) {
 }
 
 async function saveUser() {
+  const isEditing = Boolean(elements.userId.value.trim());
+  const password = elements.userPassword.value;
+  if (!isEditing && !password) {
+    throw new Error("Defina uma senha inicial para criar o usuario.");
+  }
   const payload = await api("/api/users", {
     method: "POST",
     body: {
@@ -1816,7 +1825,7 @@ async function saveUser() {
       name: elements.userName.value.trim(),
       username: elements.userUsername.value.trim(),
       email: elements.userEmail.value.trim(),
-      password: elements.userPassword.value,
+      password,
       notes: elements.userNotes.value.trim(),
       role: "user",
     },
@@ -1832,15 +1841,19 @@ function populateUserForm(user) {
   elements.userUsername.value = user.username || "";
   elements.userEmail.value = user.email || "";
   elements.userPassword.value = "";
+  elements.userPassword.required = false;
   elements.userNotes.value = user.notes || "";
   elements.userFormMode.textContent = "edicao";
+  setUserStatus(`Editando ${user.name}. Preencha a senha apenas se quiser trocá-la.`);
 }
 
 function resetUserForm() {
   elements.userForm.reset();
   elements.userId.value = "";
   elements.userPassword.value = "";
+  elements.userPassword.required = true;
   elements.userFormMode.textContent = "novo";
+  setUserStatus("Cadastre usuarios para atribuir endpoints e liberar acesso ao painel.");
 }
 
 async function removeUser(userId) {
@@ -1859,7 +1872,16 @@ async function removeUser(userId) {
     syncPreviewUserSelection();
   }
   await refreshConfig({ showStatus: false, force: true });
+  setUserStatus(`Usuario removido: ${user.name}.`);
   setStatus(`Usuario removido: ${user.name}.`);
+}
+
+function setUserStatus(message, isError = false) {
+  if (!elements.userStatusBox) {
+    return;
+  }
+  elements.userStatusBox.textContent = message;
+  elements.userStatusBox.style.color = isError ? "#ffbec3" : "";
 }
 
 async function dispatchJobForEndpoint(endpoint, action) {
