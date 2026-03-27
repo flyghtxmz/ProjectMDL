@@ -883,17 +883,18 @@ function normalizeModalAccount(raw, options = {}) {
   if (!key) {
     throw new Error("Cada conta Modal precisa de um account key.");
   }
+  const secretSuffix = buildGitHubSecretSuffix(key);
   return {
     key,
     label,
     githubTokenIdSecretName:
       normalizeOptionalText(raw?.githubTokenIdSecretName) ||
       normalizeOptionalText(raw?.github_token_id_secret_name) ||
-      `MODAL_${key.toUpperCase()}_TOKEN_ID`,
+      `MODAL_${secretSuffix}_TOKEN_ID`,
     githubTokenSecretSecretName:
       normalizeOptionalText(raw?.githubTokenSecretSecretName) ||
       normalizeOptionalText(raw?.github_token_secret_secret_name) ||
-      `MODAL_${key.toUpperCase()}_TOKEN_SECRET`,
+      `MODAL_${secretSuffix}_TOKEN_SECRET`,
     notes: normalizeOptionalText(raw?.notes),
     createdAt:
       normalizeOptionalTimestamp(raw?.createdAt) || normalizeOptionalTimestamp(raw?.created_at),
@@ -909,6 +910,15 @@ function normalizeAccountKey(value) {
     .replace(/[^a-z0-9_-]+/g, "-")
     .replace(/^-+|-+$/g, "");
   return raw || null;
+}
+
+function buildGitHubSecretSuffix(value) {
+  const normalized = String(value || "")
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  return normalized || "DEFAULT";
 }
 
 function modalAccountKvKey(accountKey) {

@@ -121,6 +121,7 @@ const elements = {
   endpointNotes: document.getElementById("endpoint-notes"),
   endpointAssignedUserId: document.getElementById("endpoint-assigned-user-id"),
   endpointEnabled: document.getElementById("endpoint-enabled"),
+  endpointStatusBox: document.getElementById("endpoint-status-box"),
   cancelEditButton: document.getElementById("cancel-edit-button"),
   formMode: document.getElementById("form-mode"),
   adminOnlySections: [...document.querySelectorAll("[data-admin-only='true']")],
@@ -130,6 +131,7 @@ boot();
 
 function boot() {
   resetUserForm();
+  resetForm();
   bindEvents();
   bootstrapSession();
 }
@@ -212,8 +214,10 @@ function bindEvents() {
       const nextConfig = buildConfigWithFormChanges();
       await saveConfig(nextConfig);
       resetForm();
+      setEndpointStatus("Endpoint salvo com sucesso.");
       setStatus("Endpoint salvo com sucesso.");
     } catch (error) {
+      setEndpointStatus(error.message, true);
       setStatus(error.message, true);
     }
   });
@@ -1468,11 +1472,12 @@ function formatBytes(value) {
 function buildConfigWithFormChanges() {
   const id = elements.endpointId.value.trim() || crypto.randomUUID();
   const current = state.config.endpoints.find((endpoint) => endpoint.id === id) || {};
+  const rawUrl = elements.endpointUrl.value.trim();
   const entry = {
     ...current,
     id,
     name: elements.endpointName.value.trim(),
-    url: elements.endpointUrl.value.trim(),
+    url: rawUrl,
     notes: elements.endpointNotes.value.trim(),
     assignedUserId: elements.endpointAssignedUserId.value.trim() || null,
     enabled: elements.endpointEnabled.checked,
@@ -1482,6 +1487,15 @@ function buildConfigWithFormChanges() {
   }
   if (!entry.url) {
     throw new Error("Preencha a URL do endpoint.");
+  }
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(entry.url);
+  } catch {
+    throw new Error("Informe uma URL valida e completa, por exemplo https://seu-endpoint.modal.run");
+  }
+  if (!["http:", "https:"].includes(parsedUrl.protocol)) {
+    throw new Error("Use uma URL http ou https para o endpoint.");
   }
 
   const endpoints = state.config.endpoints.filter((endpoint) => endpoint.id !== id);
@@ -1508,6 +1522,7 @@ function populateForm(endpoint) {
   elements.endpointAssignedUserId.value = endpoint.assignedUserId || "";
   elements.endpointEnabled.checked = endpoint.enabled !== false;
   elements.formMode.textContent = "edicao";
+  setEndpointStatus(`Editando ${endpoint.name}. Altere os campos e clique em Salvar endpoint.`);
 }
 
 function resetForm() {
@@ -1516,6 +1531,7 @@ function resetForm() {
   elements.endpointEnabled.checked = true;
   elements.endpointAssignedUserId.value = "";
   elements.formMode.textContent = "novo";
+  setEndpointStatus("Cadastre a URL base do endpoint do Modal para habilitar o proxy e o monitoramento.");
 }
 
 async function activateEndpoint(endpointId) {
@@ -1882,6 +1898,14 @@ function setUserStatus(message, isError = false) {
   }
   elements.userStatusBox.textContent = message;
   elements.userStatusBox.style.color = isError ? "#ffbec3" : "";
+}
+
+function setEndpointStatus(message, isError = false) {
+  if (!elements.endpointStatusBox) {
+    return;
+  }
+  elements.endpointStatusBox.textContent = message;
+  elements.endpointStatusBox.style.color = isError ? "#ffbec3" : "";
 }
 
 async function dispatchJobForEndpoint(endpoint, action) {
